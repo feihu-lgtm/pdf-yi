@@ -1,5 +1,5 @@
 import re, json, os, sys
-READER = '/mnt/user-data/outputs/pdf-reader-v58.html'
+READER = '/mnt/user-data/outputs/pdf-reader-v60.html'
 OUT = '/home/claude/build/www/core'
 os.makedirs(OUT, exist_ok=True)
 s = open(READER, encoding='utf-8').read(); js = s[s.index('<script>\n'):]
@@ -16,13 +16,13 @@ def fn(name):
 def line(prefix):
     m = re.search(r'(?m)^' + re.escape(prefix) + r'[^\n]*', js); assert m, prefix; return m.group(0)
 def take(*names): return '\n'.join(fn(n) for n in names)
-HEAD = '// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v58.html 原样移植生成，逻辑与全量版一致。\n'
+HEAD = '// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v60.html 原样移植生成，逻辑与全量版一致。\n'
 
 # ── textutil.js：纯文字处理，不碰页面 ──
 textutil = HEAD + '''// 文字工具：拼接、康熙部首、上标、分栏、句末判断、断行。全部是纯函数。
 var VENDOR=window.PDFYI_VENDOR||'vendor/';
 ''' + '\n'.join([line('var _TERM='), line('var _ABBR='), line('var _ROMAN='), line('var _CJKEND='), line('var _BREAK_TOK='), line('var _NO_START=')]) + '\n' + take(
-    '_kangxi', '_jn', '_jnAll', '_isZhPara', '_isPageNo', 'pageTextQuality', '_colOrder', 'extractParas', 'groupsToBboxes',
+    '_kangxi', '_jn', '_jnAll', '_isZhPara', '_isPageNo', 'pageTextQuality', '_xyOrder', '_colOrder', 'extractParas', 'groupsToBboxes',
     '_lines', '_normLine', '_headingLike', '_sentEnd', 'groupRaw', 'getMsgContent', 'getFinishReason', '_wrap') + '\n'
 open(OUT + '/textutil.js', 'w', encoding='utf-8').write(textutil)
 
@@ -53,7 +53,7 @@ function getMagpieModel(){var m='',c='';try{m=localStorage.getItem('pdfyi_magpie
   if(m==='__custom__')return c||'auto/gemini-3.8-flash';return m||'auto/gemini-3.8-flash'}
 function getKey(){return 'sk-antigravity'}
 var _glossary=[];
-''' + retry + '\n' + take('glossaryOn', '_glossaryFor', 'buildGlossary', 'aiMergeLines', 'apiBatch') + r'''
+''' + retry + '\n' + take('glossaryOn', '_glossaryFor', 'buildGlossary', '_refineGroups', 'aiMergeLines', 'apiBatch') + r'''
 // 翻译一页：中文段落原样保留；按字数分批（约 3000 字符、最多 24 段）；没翻好的对半拆开重翻，最多三层
 async function translatePage(p,paras,onBatch){
   var apiKey=getKey(),BUDGET=3000,MAXN=24,results=new Array(paras.length),need=[],ck0=cacheKey;

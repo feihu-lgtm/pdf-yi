@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v58.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v60.html 原样移植生成，逻辑与全量版一致。
 // 翻译：只走 Magpie。配置和全量版共用同一份浏览器存储（端点、模型）。
 var activeModel='magpie';
 function getMagpieUrl(){var e='';try{e=(localStorage.getItem('pdfyi_magpie_endpoint')||'').trim()}catch(x){}var u=(e||'http://127.0.0.1:3426/v1').replace(/\/+$/,'');
@@ -75,6 +75,32 @@ async function buildGlossary(){
     addTransLog('?','',_glossary.length+' 条：'+_glossary.map(function(g){return g[0]+'='+g[1]}).join('；'),activeModel,'术语表',true);
   }catch(e){_glossary=[];addTransLog('?','','没提取成（不影响翻译）：'+(e.message||e),activeModel,'术语表',false)}
   return _glossary}
+function _refineGroups(idxGroups,rawLines){
+  var xs=rawLines._xs||[],ys=rawLines._ys||[],orig=rawLines._orig||rawLines;
+  var END=/[.!?。！？:：…]["”’)\]）」』》]*(\d{0,3}|[⁰¹²³⁴⁵⁶⁷⁸⁹*†‡]{0,3})$/,UP=/^["“‘(\[]?[A-Z0-9]/;
+  var leftOf=function(i){var x=xs[i];if(x==null||!isFinite(x))return null;var m=x;
+    for(var d=-4;d<=4;d++){var j=i+d,xj=xs[j];if(d===0||xj==null||!isFinite(xj)||!String(rawLines[j]||'').trim())continue;if(Math.abs(xj-x)<30)m=Math.min(m,xj)}return m};
+  var out=[];
+  idxGroups.forEach(function(g){
+    if(g.length<2){out.push(g);return}
+    var lens=g.map(function(i){return String(rawLines[i]||'').length}).sort(function(a,b){return a-b}),med=lens[Math.floor(lens.length/2)];
+    var sp=[];for(var k0=1;k0<g.length;k0++){var ya=ys[g[k0-1]],yb=ys[g[k0]];if(ya!=null&&yb!=null&&ya>yb)sp.push(ya-yb)}sp.sort(function(a,b){return a-b});var typ=sp.length?sp[Math.floor(sp.length/2)]:0;
+    var cur=[g[0]];
+    for(var k=1;k<g.length;k++){
+      var a=g[k-1],b=g[k],ta=String(rawLines[a]||'').trim(),tb=String(rawLines[b]||'').trim(),end=END.test(ta),brk=false;
+      // ① 原文本来有空行
+      if(b>a+1){for(var q=a+1;q<b;q++){if(orig[q]===''&&(end||tb.length<60)){brk=true;break}}}
+      // ② 首行缩进
+      if(!brk&&end&&xs[a]!=null&&xs[b]!=null&&isFinite(xs[a])&&isFinite(xs[b])&&xs[b]-xs[a]>=5&&xs[b]-xs[a]<40)brk=true;// 和上一行比（引文块整块缩进不算）
+      // ③ 段落末行偏短
+      if(!brk&&end&&med>=30&&ta.length<med*0.7&&UP.test(tb))brk=true;
+      // ④ 行距明显变大（真实论文：正常行距 10–11pt，引文块和标题前后 15pt）
+      if(!brk&&typ>0&&ys[a]!=null&&ys[b]!=null&&ys[a]>ys[b]&&ys[a]-ys[b]>typ*1.35)brk=true;
+      // ⑤ 短行后面跟缩进行
+      if(!brk&&med>=30&&ta.length<med*0.6&&xs[a]!=null&&xs[b]!=null&&isFinite(xs[a])&&isFinite(xs[b])&&xs[b]-xs[a]>=5&&xs[b]-xs[a]<40)brk=true;
+      if(brk){out.push(cur);cur=[b]}else cur.push(b)}
+    out.push(cur)});
+  return out}
 async function aiMergeLines(rawLines,apiKey){
   // 过滤掉纯空行，编号，送AI
   var numbered=[];var lineMap=[];
@@ -110,10 +136,13 @@ async function aiMergeLines(rawLines,apiKey){
     // v33：校验覆盖——任何一行没被分进组，整页回退规则分段，避免静默丢句
     var covered={};groups.forEach(function(g){if(Array.isArray(g))g.forEach(function(n){n=parseInt(n);if(n>=1&&n<=numbered.length)covered[n]=1})});
     if(Object.keys(covered).length<numbered.length)throw new Error('合并结果遗漏 '+(numbered.length-Object.keys(covered).length)+' 行');
-    var result=[],idxGroups=[];
+    var result=[],idxGroups=[],rawG=[];
     groups.forEach(function(g){
       if(!Array.isArray(g)||g.length===0)return;
       var idxs=g.map(function(n){return lineMap[parseInt(n)-1]}).filter(function(x){return x!==undefined});
+      if(idxs.length)rawG.push(idxs)});
+    // v59：按版面信号再断开
+    _refineGroups(rawG,rawLines).forEach(function(idxs){
       var parts=idxs.map(function(i){return rawLines[i]||''}).filter(Boolean);
       var merged=_jnAll(parts).replace(/\s+/g,' ').trim();
       if(merged.length>2){result.push(merged);idxGroups.push(idxs)}});

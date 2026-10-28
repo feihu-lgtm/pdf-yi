@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v58.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v60.html 原样移植生成，逻辑与全量版一致。
 // 提取：每页的原始行（pdf.js）、页眉页脚识别、脚注区、跨页补句。
 // 下面这些是“当前这本书”的状态，后台引擎每开一本书就重置一次（见 worker.js 的 resetBook）。
 var pdfDoc=null,rawPdfBytes=null,totalPages=0,cacheKey='';
@@ -79,6 +79,7 @@ async function prepOf(p){
   else carryMark[p]='';
   // 译文里隐藏页眉页脚和页码
   if(cleanRules&&cleanRules.hide){var L=_lines(r),n=L.length;L.forEach(function(x,k){if(isRunningLine(p,k,n,x.s,null))lines[x.i]=''})}
+  lines._xs=(r.rawXs||[]).slice();lines._ys=ys;lines._orig=r.rawLines||[];// v59：行起点横坐标、原文空行位置，合并后细分段落用
   return {rawLines:lines,rawYs:ys}}
 async function validateCleanRules(c,autoList){
   var N=totalPages,ok=[],bad=[],all=[];

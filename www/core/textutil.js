@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v58.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v60.html 原样移植生成，逻辑与全量版一致。
 // 文字工具：拼接、康熙部首、上标、分栏、句末判断、断行。全部是纯函数。
 var VENDOR=window.PDFYI_VENDOR||'vendor/';
 var _TERM=/[.!?。！？…]["”’)\]）」』》]*(\d{0,3}|[⁰¹²³⁴⁵⁶⁷⁸⁹*†‡]{0,3})$/;
@@ -19,6 +19,26 @@ function pageTextQuality(lines){
   if(ns===0)return {kind:'empty',msg:'这一页提取不到正文文字（一个字都没有，或者只读出了页码）：可能是扫描件、整页图片、空白页，或者字体缺少字符映射。'};
   if(ns>=15&&letters/ns<0.35)return {kind:'garbled',msg:'这一页的字读不出来，只剩标点和数字：可能是扫描件，或者字体缺少字符映射。'};
   return null}
+function _xyOrder(its){
+  var B=its.map(function(it){var t=it.transform,fs=Math.hypot(t[0],t[1])||Math.abs(t[3])||8;return {it:it,x0:t[4],x1:t[4]+(it.width||0),y0:t[5]-fs*0.2,y1:t[5]+fs*0.8,y:t[5]}});
+  var used=false,out=[],blk=0;
+  var gap=function(arr,a,b){var iv=arr.map(function(o){return [o[a],o[b]]}).sort(function(p,q){return p[0]-q[0]});var best={size:0,at:null},end=iv.length?iv[0][1]:0;
+    for(var i=1;i<iv.length;i++){if(iv[i][0]>end){var g=iv[i][0]-end;if(g>best.size)best={size:g,at:(iv[i][0]+end)/2}}end=Math.max(end,iv[i][1])}return best};
+  // 同一行的容差按“这一行已有的字和新字里较大的字号”的 0.55 倍算（上标比正文高 4–5pt，仍算同一行）
+  var leaf=function(arr){arr.sort(function(p,q){return q.y-p.y});var rows=[],row=null;
+    arr.forEach(function(o){var f=o.y1-o.y0;if(!row||row.y-o.y>Math.max(1.5,Math.max(row.fs,f)*0.55)){row={y:o.y,fs:f,a:[]};rows.push(row)}else row.fs=Math.max(row.fs,f);row.a.push(o)});
+    blk++;rows.forEach(function(r){r.a.sort(function(p,q){return p.x0-q.x0});r.a.forEach(function(o){o.it._blk=blk;out.push(o.it)})})};
+  var cut=function(arr,depth){
+    if(arr.length<2||depth>60){leaf(arr);return}
+    var v=gap(arr,'x0','x1'),h=gap(arr,'y0','y1');
+    var oneLine=Math.max.apply(null,arr.map(function(o){return o.y}))-Math.min.apply(null,arr.map(function(o){return o.y}))<3;// 只剩一行时，行内空隙要 ≥15pt 才切
+    if(v.size>=(oneLine?15:8)){var L=arr.filter(function(o){return (o.x0+o.x1)/2<v.at}),R=arr.filter(function(o){return (o.x0+o.x1)/2>=v.at});
+      if(L.length&&R.length){used=true;cut(L,depth+1);cut(R,depth+1);return}}
+    if(h.size>0.5){var T=arr.filter(function(o){return (o.y0+o.y1)/2>h.at}),D=arr.filter(function(o){return (o.y0+o.y1)/2<=h.at});
+      if(T.length&&D.length){cut(T,depth+1);cut(D,depth+1);return}}
+    leaf(arr)};
+  cut(B,0);
+  return {items:out,vertical:used}}
 function _colOrder(items,W){
   var its=items.filter(function(it){return it&&it.str&&it.str.trim()});
   _colOrder.info=null;
@@ -31,13 +51,15 @@ function _colOrder(items,W){
     lines.forEach(function(L){var hasL=L.some(function(it){return x1(it)<=sx-4}),hasR=L.some(function(it){return x0(it)>=sx+4}),cov=L.some(function(it){return x0(it)<sx+4&&x1(it)>sx-4});
       if(hasL&&hasR){both++;if(!cov)free++}});
     if(!best||free>best.free)best={sx:sx,free:free,both:both}}
-  if(!best||best.both<5||best.free<5||best.free<best.both*0.6)return items;
+  var _xo=_xyOrder(its);
+  if(!best||best.both<5||best.free<5||best.free<best.both*0.6)return _xo.vertical?_xo.items:items;
   var sx=best.sx,ys=function(L){return L[0].transform[5]};
   lines.sort(function(a,b){return ys(b)-ys(a)});
   // v55：记下分界线，以及页面中间（去掉上下各 8%）横跨两栏的行数，按栏对照时要用
   var yTop=ys(lines[0]),yBot=ys(lines[lines.length-1]),span=Math.max(1,yTop-yBot),fullMid=0;
   lines.forEach(function(L){var y=ys(L);if(y<yTop-span*0.08&&y>yBot+span*0.08&&L.some(function(it){return x0(it)<sx-4&&x1(it)>sx+4}))fullMid++});
   _colOrder.info={sx:sx,fullMid:fullMid};
+  if(_xo.vertical)return _xo.items;// v59：阅读顺序用按空白切块的结果
   var out=[],blockL=[],blockR=[];
   var flush=function(){blockL.forEach(function(L){out.push.apply(out,L)});blockR.forEach(function(L){out.push.apply(out,L)});blockL=[];blockR=[]};
   lines.forEach(function(L){
@@ -49,7 +71,7 @@ function _colOrder(items,W){
   flush();
   return out}
 function extractParas(tc,viewport){
-  var pdfH=viewport.height,pdfW=viewport.width;var lines=[],prevY=null,prevYRaw=null,cur='',curItems=[];
+  var pdfH=viewport.height,pdfW=viewport.width;var lines=[],prevY=null,prevYRaw=null,cur='',curItems=[],prevBlk;
   var _items=_colOrder(tc.items,pdfW);// v40：双栏先分栏
   // v41：正文字号 = 全页字数最多的那个字号；用来认上标脚注号和脚注区
   var _fsOf=function(it){var t=it.transform;return Math.hypot(t[0],t[1])||Math.abs(t[3])||0};
@@ -67,7 +89,8 @@ function extractParas(tc,viewport){
     if(cur&&prevY!==null&&bodyFs&&/^(\d{1,3}|[*†‡§¶])$/.test(_supTxt)&&((ifs<bodyFs*0.8&&rise>=1&&rise<=8)||(ifs<=bodyFs*1.02&&rise>=bodyFs*0.25&&rise<=bodyFs*0.6))){
       st=_supTxt;
       cur=cur.replace(/\s+$/,'')+st.replace(/\d/g,function(d){return _SUP[d]});curItems.push(Object.assign({},item,{_sup:true}));continue}
-    if(prevY!==null&&Math.abs(y-prevY)>5){if(cur.trim())lines.push({str:_supTidy(cur.trim()),y:prevY,items:curItems.slice(),fs:_lineFs(curItems)});cur=item.str;curItems=[item]}
+    var _nb=(prevBlk!==undefined&&item._blk!==undefined&&item._blk!==prevBlk);prevBlk=item._blk;// v59：换了块就换行
+    if(prevY!==null&&(Math.abs(y-prevY)>5||_nb)){if(cur.trim())lines.push({str:_supTidy(cur.trim()),y:prevY,items:curItems.slice(),fs:_lineFs(curItems)});cur=item.str;curItems=[item]}
     else{cur=_jn(cur,item.str);curItems.push(item)}prevY=y;if(st)prevYRaw=yRaw}
   if(cur.trim())lines.push({str:_supTidy(cur.trim()),y:prevY,items:curItems,fs:_lineFs(curItems)});
   // ── 规则预合并：行间距异常大（段落空白行）才强制断段，其余全部暂时合入同一组 ──
@@ -81,17 +104,17 @@ function extractParas(tc,viewport){
       if(gap>approxLineH*1.8){paras.push(paraLines.slice());paraLines=[ln];continue}}
     paraLines.push(ln)}
   if(paraLines.length)paras.push(paraLines);
-  var texts=[],bboxes=[],rawLines=[],rawYs=[],rawFs=[];
+  var texts=[],bboxes=[],rawLines=[],rawYs=[],rawFs=[],rawXs=[];
   paras.forEach(function(pls){
     // 把每个初步分组里的行逐行记录，供AI合并
-    pls.forEach(function(l){rawLines.push(l.str);rawYs.push(l.y);rawFs.push(l.fs||0)});
-    rawLines.push('');rawYs.push(null);rawFs.push(null);// 空字符串作为组间分隔符
+    pls.forEach(function(l){rawLines.push(l.str);rawYs.push(l.y);rawFs.push(l.fs||0);rawXs.push(l.items&&l.items.length?Math.min.apply(null,l.items.filter(function(it){return !it._sup}).map(function(it){return it.transform[4]}).concat([Infinity])):null)});
+    rawLines.push('');rawYs.push(null);rawFs.push(null);rawXs.push(null);// 空字符串作为组间分隔符
   });
   // 同时保留一份 fallback 的传统合并结果
   paras.forEach(function(pls){var t=_jnAll(pls.map(function(l){return l.str})).replace(/\s+/g,' ').trim();if(t.length<=2)return;
     var minY=Infinity,maxY=-Infinity;pls.forEach(function(l){if(l.y<minY)minY=l.y;if(l.y>maxY)maxY=l.y});
     texts.push(t);bboxes.push({y:minY,h:maxY-minY+14})});
-  return{texts:texts,bboxes:bboxes,pdfH:pdfH,pdfW:pdfW,rawLines:rawLines,rawYs:rawYs,rawFs:rawFs,bodyFs:bodyFs}}
+  return{texts:texts,bboxes:bboxes,pdfH:pdfH,pdfW:pdfW,rawLines:rawLines,rawYs:rawYs,rawFs:rawFs,rawXs:rawXs,bodyFs:bodyFs}}
 function groupsToBboxes(groups,ys){
   if(!groups||!ys)return [];
   return groups.map(function(g){var mn=Infinity,mx=-Infinity,y0=null;g.forEach(function(i){var y=ys[i];if(y==null)return;if(y0==null)y0=y;if(y<mn)mn=y;if(y>mx)mx=y});
