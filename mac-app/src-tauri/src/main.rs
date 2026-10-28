@@ -1,6 +1,6 @@
 // PDF译 的 Mac 外壳。翻译、提取、生成双栏 PDF 都在页面（www/）里做，这里只负责：
 //   1. 开窗口；关窗口时只是藏起来，翻译接着跑
-//   2. 菜单栏：小鱼头像随进度“染发”，旁边显示进度文字；点开是一份随状态变化的菜单
+//   2. 菜单栏：小鱼按状态换表情，旁边显示进度文字；点开是一份随状态变化的菜单
 //   3. 接收 Zotero 插件发来的 pdfyi:// 链接（交给页面处理）
 //   4. 把翻好的双栏 PDF 交给 Zotero 插件挂回条目（从这里发请求，不受网页跨域限制）
 //   5. 打开文件、在访达中显示
@@ -14,23 +14,25 @@ use tauri::{
     AppHandle, Emitter, Manager, WindowEvent, Wry,
 };
 
-// 小鱼头像：0 是没染，8 是染满（打包进程序里）
-const XIAOYU: [&[u8]; 9] = [
-    include_bytes!("../icons/tray/xiaoyu-0.png"),
-    include_bytes!("../icons/tray/xiaoyu-1.png"),
-    include_bytes!("../icons/tray/xiaoyu-2.png"),
-    include_bytes!("../icons/tray/xiaoyu-3.png"),
-    include_bytes!("../icons/tray/xiaoyu-4.png"),
-    include_bytes!("../icons/tray/xiaoyu-5.png"),
-    include_bytes!("../icons/tray/xiaoyu-6.png"),
-    include_bytes!("../icons/tray/xiaoyu-7.png"),
-    include_bytes!("../icons/tray/xiaoyu-8.png"),
-];
+// 小鱼的四种表情（小狐画的，打包进程序里）：睡着了=空闲，在思考=翻译中，平时=暂停，来灵感=生成和完成
+const SLEEPING: &[u8] = include_bytes!("../icons/tray/sleeping.png");
+const THINKING: &[u8] = include_bytes!("../icons/tray/thinking.png");
+const NORMAL: &[u8] = include_bytes!("../icons/tray/normal.png");
+const INSPIRED: &[u8] = include_bytes!("../icons/tray/inspired.png");
+
+fn mood_icon(mood: &str) -> &'static [u8] {
+    match mood {
+        "thinking" => THINKING,
+        "normal" => NORMAL,
+        "inspired" => INSPIRED,
+        _ => SLEEPING,
+    }
+}
 
 // 页面推过来的状态（见 www/index.html 里的 trayState）
 #[derive(serde::Deserialize)]
 struct TrayState {
-    level: u8,
+    mood: String,
     title: String,
     book: String,
     line: String,
@@ -74,12 +76,11 @@ fn build_menu(app: &AppHandle, st: &TrayState) -> tauri::Result<Menu<Wry>> {
     Ok(m)
 }
 
-// 页面上的状态一变，就调这个：换头像、换文字、重建菜单
+// 页面上的状态一变，就调这个：换表情、换文字、重建菜单
 #[tauri::command]
 fn tray_update(app: AppHandle, state: TrayState) -> Result<(), String> {
     let tray = app.tray_by_id("main").ok_or("菜单栏图标还没建好")?;
-    let lv = state.level.min(8) as usize;
-    let img = Image::from_bytes(XIAOYU[lv]).map_err(|e| e.to_string())?;
+    let img = Image::from_bytes(mood_icon(&state.mood)).map_err(|e| e.to_string())?;
     tray.set_icon(Some(img)).map_err(|e| e.to_string())?;
     let _ = tray.set_icon_as_template(true);
     let title = if state.title.is_empty() { None } else { Some(state.title.clone()) };
@@ -151,13 +152,13 @@ fn main() {
         ])
         .setup(|app| {
             let idle = TrayState {
-                level: 0, title: String::new(), book: String::new(), line: String::new(),
+                mood: "sleeping".into(), title: String::new(), book: String::new(), line: String::new(),
                 fail_line: String::new(), queue: vec![], paused: false, busy: false,
                 has_last: false, notify: true,
             };
             let menu = build_menu(app.handle(), &idle)?;
             TrayIconBuilder::with_id("main")
-                .icon(Image::from_bytes(XIAOYU[0])?)
+                .icon(Image::from_bytes(SLEEPING)?)
                 .icon_as_template(true)
                 .tooltip("PDF译")
                 .menu(&menu)

@@ -1,6 +1,11 @@
 <!--
-  版本: v46
+  版本: v47
   更新日志:
+  v47 (本次：菜单栏换成小狐画的四张小鱼):
+    - 菜单栏图标改用四张手绘的小鱼（水母头女孩）：平时、来灵感、在思考、睡着了。按状态换表情，不再用“染头发”表示进度，进度看旁边的数字：
+      · 空闲 → 睡着了；翻译中 → 在思考（旁边“31/60”“⚠2”“+1”）；暂停 → 平时（“暂停 31/60”）；
+        生成双栏 PDF → 来灵感（“生成中”）；完成 → 来灵感（“完成”，10 秒后回到睡着了）。
+    - 转成菜单栏模板图标时，把画里白色的脸、眼睛、嘴挖空，浅色和深色菜单栏下表情都看得清。原图放在 design/menubar-icons/。
   v46 (本次：合入小宝的三处修复；Mac 菜单栏换成小鱼头像；暂停；完成通知):
     - 合入小宝在 v44 上做的本地修复（由小宝在本机实测过）：
       · 逐页进度：顶栏多一个“逐页进度”按钮，面板里列出每一页的状态（等待、提取、合并、翻译、完成、失败、
@@ -3154,16 +3159,17 @@ function etaText(){
 function trayState(){
   var t=_pageProgressTotals||{},pages=t.pages||0,fin=t.finished||0,active=pages>0&&fin<pages;
   var fails=[];Object.keys(_pageProgress).forEach(function(p){if(_pageProgress[p].stage==='failed')fails.push(+p)});fails.sort(function(a,b){return a-b});
-  var level=pages?Math.round(fin/pages*8):0,title='';
-  if(_bpBusy){level=8;title='生成中'}
-  else if(active){title=(_paused?'暂停 ':'')+fin+'/'+pages+(fails.length?' ⚠'+fails.length:'')}
-  else if(Date.now()<_trayDoneUntil){level=8;title='完成'}
-  else level=0;
+  // v47：菜单栏用小鱼的四种表情——睡着了（空闲）、在思考（翻译中）、平时（暂停）、来灵感（生成和完成）
+  var mood='sleeping',title='';
+  if(_bpBusy){mood='inspired';title='生成中'}
+  else if(active){mood=_paused?'normal':'thinking';title=(_paused?'暂停 ':'')+fin+'/'+pages+(fails.length?' ⚠'+fails.length:'')}
+  else if(Date.now()<_trayDoneUntil){mood='inspired';title='完成'}
+  else if(pages&&(autoBiPdf||window._activeJob)&&_pageDoneTimes.length&&Date.now()-_pageDoneTimes[_pageDoneTimes.length-1]<3000){mood='inspired';title='生成中'}// 刚翻完、马上要生成：别闪一下“睡着了”
   if(_jobQueue.length)title+=(title?' ':'')+'+'+_jobQueue.length;
   var eta=(active&&!_paused)?etaText():'';
   var line=!pages?'':(_bpBusy?'正在生成双栏 PDF':(active?((_paused?'已暂停 ':'翻译中 ')+fin+'/'+pages+' 页 · '+(t.settled||0)+'/'+(t.total||0)+' 段'+(eta?' · '+eta:'')):'已完成 '+pages+' 页'+(t.failed?' · '+t.failed+' 段失败':'')));
   var failLine=fails.length?'⚠ 第 '+fails.slice(0,5).join('、')+(fails.length>5?' 等':'')+' 页有 '+(t.failed||fails.length)+' 段失败 — 打开逐页进度':'';
-  return {level:level,title:title,book:pages?($('doc-title').textContent||''):'',line:line,fail_line:failLine,
+  return {mood:mood,title:title,book:pages?($('doc-title').textContent||''):'',line:line,fail_line:failLine,
     queue:_jobQueue.map(function(j){return j.path.slice(j.path.lastIndexOf('/')+1).replace(/\.pdf$/i,'')+' · 来自 Zotero'}),
     paused:_paused,busy:active,has_last:!!window._lastBiPdf,notify:notifyDone}}
 function trayPush(){
