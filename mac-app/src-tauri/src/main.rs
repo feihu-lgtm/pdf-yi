@@ -188,12 +188,29 @@ fn tray_update(app: AppHandle, state: TrayState) -> Result<(), String> {
     Ok(())
 }
 
-// Zotero 插件在本地服务注册的接口；由原生层请求，网页不需要跨域权限。
+// 本地安全口令：保存在 ~/.pdfyi-token，与 Zotero 插件共享以防止恶意网页跨站请求本地服务。
+fn get_or_create_token() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let token_path = std::path::Path::new(&home).join(".pdfyi-token");
+    if let Ok(content) = std::fs::read_to_string(&token_path) {
+        let t = content.trim().to_string();
+        if !t.is_empty() { return t; }
+    }
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let token = format!("{:032x}", seed ^ 0x5a7c2b3d4e5f6071);
+    let _ = std::fs::write(&token_path, &token);
+    token
+}
+
+// Zotero 插件在本地服务注册的接口；由原生层请求，携带本地口令，拦截跨站调用。
 fn zotero_post(endpoint: &str, body: serde_json::Value) -> Result<String, String> {
+    let token = get_or_create_token();
     let url = format!("http://127.0.0.1:23119{}", endpoint);
     match ureq::post(&url)
         .set("Content-Type", "application/json")
         .set("Zotero-Allowed-Request", "true")
+        .set("X-PDFYi-Token", &token)
         .timeout(Duration::from_secs(120))
         .send_json(body)
     {

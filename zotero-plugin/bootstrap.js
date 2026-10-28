@@ -108,6 +108,45 @@ function requestData(req) {
   }
 }
 
+var expectedToken = null;
+async function getExpectedToken() {
+  if (expectedToken) return expectedToken;
+  try {
+    let home = Services.dirsvc.get('Home', Ci.nsIFile).path;
+    let p = PathUtils.join(home, '.pdfyi-token');
+    if (await IOUtils.exists(p)) {
+      expectedToken = (await IOUtils.readUTF8(p)).trim();
+      return expectedToken;
+    }
+  } catch (e) {}
+  try {
+    let p2 = PathUtils.join(PathUtils.profileDir, '../../../../.pdfyi-token');
+    if (await IOUtils.exists(p2)) {
+      expectedToken = (await IOUtils.readUTF8(p2)).trim();
+      return expectedToken;
+    }
+  } catch (e) {}
+  return null;
+}
+
+async function checkSecurity(req) {
+  let headers = (req && req.headers) || {};
+  if (headers['origin']) {
+    throw Object.assign(new Error('禁止跨域调用 (Origin rejected)'), { status: 403 });
+  }
+  if (headers['sec-fetch-site'] && headers['sec-fetch-site'] !== 'same-origin' && headers['sec-fetch-site'] !== 'none') {
+    throw Object.assign(new Error('禁止跨站调用 (Sec-Fetch-Site rejected)'), { status: 403 });
+  }
+  let expected = await getExpectedToken();
+  if (!expected) {
+    throw Object.assign(new Error('未找到本地安全口令文件 ~/.pdfyi-token'), { status: 403 });
+  }
+  let given = (headers['x-pdfyi-token'] || '').trim();
+  if (!given || given !== expected) {
+    throw Object.assign(new Error('口令无效或缺失 (Invalid or missing token)'), { status: 403 });
+  }
+}
+
 // 只读文件头和末尾，必须在创建、删除或替换任何 Zotero 条目前完成。
 async function validatePDF(path) {
   if (typeof path !== 'string' || !path.trim()) {
@@ -300,6 +339,7 @@ function registerEndpoint() {
     permitBookmarklet: false,
     init: async function (req) {
       try {
+        await checkSecurity(req);
         let d = requestData(req);
         if (!d.key || typeof d.path !== 'string' || !/_双栏\.pdf$/.test(d.path)) return jsonResponse(400, { ok: false, error: '参数不对' });
         await validatePDF(d.path);
@@ -350,6 +390,7 @@ function registerEndpoint() {
     permitBookmarklet: false,
     init: async function (req) {
       try {
+        await checkSecurity(req);
         let d = requestData(req);
         // 查重与写入串行，防止同时点击导入时建立两个父条目。
         let result = importQueue.then(() => importPDFs(d));
