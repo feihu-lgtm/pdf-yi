@@ -1,6 +1,9 @@
 <!--
-  版本: v49
+  版本: v50
   更新日志:
+  v50 (本次：并发改回默认 6、范围 6–30):
+    - 小狐的决定：v49 测出发热主要来自页面绘制，不是并发，所以并发改回默认 6，可选 6 / 8 / 10 / 12 / 16 / 20 / 24 / 30。
+      v48、v49 存下的 2、3、4 自动变成 6。按字数分批、截断拆开重翻、请求错开 200 毫秒都保留。
   v49 (本次：按小宝实测的热点，改页面绘制和日志刷新):
     - 小宝实测：翻译时 WebKit 的页面进程峰值 162.7%，网络这一层（Magpie、3426 反代、SSH 隧道）几乎是 0；
       调用栈热点在图层合成、画布绘制和整块 innerHTML 重刷。
@@ -970,10 +973,10 @@ mark.align-hl{background:color-mix(in srgb,var(--tS) 22%,transparent);color:inhe
   <div class="s-row"><label for="auto-bipdf">翻完自动生成双栏 PDF</label><input type="checkbox" id="auto-bipdf" style="accent-color:var(--tJ)"></div>
   <div class="s-row" id="conc-row"><label for="conc-select">同时发几个请求</label>
     <select id="conc-select" style="flex:2;min-width:0;padding:4px;font-size:11px">
-      <option value="2">2（最省电）</option><option value="3" selected>3（默认）</option><option value="4">4</option><option value="6">6</option><option value="8">8</option><option value="12">12（最快，也最热）</option>
+      <option value="6" selected>6（默认）</option><option value="8">8</option><option value="10">10</option><option value="12">12</option><option value="16">16</option><option value="20">20</option><option value="24">24</option><option value="30">30（最快，风险也最大）</option>
     </select>
   </div>
-  <div class="s-row" style="font-size:10px;color:var(--mute);line-height:1.5;margin-top:-4px">OCR 清理、段落合并、翻译都按这个数来。越大越快，但电脑越热、同一时间打到账号上的请求也越多。</div>
+  <div class="s-row" style="font-size:10px;color:var(--mute);line-height:1.5;margin-top:-4px">OCR 清理、段落合并、翻译都按这个数来。越大越快，但同一时间打到账号上的请求也越多。</div>
   <div class="s-row"><button id="clear-keys-btn" style="width:100%;padding:6px;background:transparent;border:1px solid var(--border2);color:var(--red,#e05252);cursor:pointer;font-family:var(--font-mono);font-size:11px">清除已保存 Key</button></div>
   <div style="border-top:1px solid var(--border2);margin-top:8px;padding-top:8px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
@@ -1259,8 +1262,8 @@ function getFinishReason(d){return d&&d.choices&&d.choices[0]?(d.choices[0].fini
 function allPageNums(){if(window._realPageOrder)return window._realPageOrder.slice();var a=[];for(var i=1;i<=totalPages;i++)a.push(i);return a}
 function maxPageNum(){var a=allPageNums();return a.length?Math.max.apply(null,a):0}
 // v35：并发数由设置里的“同时发几个请求”决定，默认 6，所有环节共用；不再写死 25 / 50
-function getConc(){var v=3;try{v=parseInt(localStorage.getItem('pdfyi_conc'))||3}catch(e){}return Math.max(2,Math.min(12,v))}
-(function(){var sel=$('conc-select');if(!sel)return;sel.value=String(getConc());if(!sel.value){sel.value='3';try{localStorage.setItem('pdfyi_conc','3')}catch(e){}}
+function getConc(){var v=6;try{v=parseInt(localStorage.getItem('pdfyi_conc'))||6}catch(e){}return Math.max(6,Math.min(30,v))}
+(function(){var sel=$('conc-select');if(!sel)return;var _c=getConc();try{var _raw=parseInt(localStorage.getItem('pdfyi_conc'));if(_raw&&_raw!==_c)localStorage.setItem('pdfyi_conc',String(_c))}catch(e){}sel.value=String(_c);if(!sel.value)sel.value='6';
   sel.addEventListener('change',function(){try{localStorage.setItem('pdfyi_conc',sel.value)}catch(e){}CONC=getConc();toast('同时发 '+sel.value+' 个请求，下一批开始生效','ok')})})();
 var savedEnCache={};// v33：与译文缓存配套保存的原文分段 {texts,bboxes}
 function escHtml(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
