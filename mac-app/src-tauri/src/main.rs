@@ -1,5 +1,6 @@
 // PDF译 的 Mac 外壳。翻译、提取、生成双栏 PDF 都在页面（www/）里做，这里只负责：
 //   1. 开窗口；关窗口时只是藏起来，翻译接着跑
+//   0. 两个窗口：main 是全量版阅读器，worker 是看不见的后台引擎（Zotero 交来的书、“后台翻译文件…”都由它翻）
 //   2. 菜单栏：小鱼按状态换表情，旁边显示进度文字；点开是一份随状态变化的菜单
 //   3. 接收 Zotero 插件发来的 pdfyi:// 链接（交给页面处理）
 //   4. 把翻好的双栏 PDF 交给 Zotero 插件挂回条目（从这里发请求，不受网页跨域限制）
@@ -67,6 +68,8 @@ fn build_menu(app: &AppHandle, st: &TrayState) -> tauri::Result<Menu<Wry>> {
         }
     }
     m.append(&PredefinedMenuItem::separator(app)?)?;
+    // v53：交给后台引擎翻（不打开阅读器）
+    m.append(&MenuItem::with_id(app, "bg_open", "后台翻译文件…", true, none)?)?;
     let pause_text = if st.paused { "继续翻译" } else { "暂停翻译" };
     m.append(&MenuItem::with_id(app, "pause", pause_text, st.busy || st.paused, Some("CmdOrCtrl+P"))?)?;
     m.append(&MenuItem::with_id(app, "open_last", "打开上一份双栏 PDF", st.has_last, none)?)?;

@@ -1,9 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "PDF译 主窗口的权限：打开和存储文件、读写用户目录下的 PDF、接收 pdfyi:// 链接",
+  "description": "PDF译 两个窗口（全量版 main、后台引擎 worker）的权限：打开和存储文件、读写用户目录下的 PDF、接收 pdfyi:// 链接、通知",
   "windows": [
-    "main"
+    "main",
+    "worker"
   ],
   "permissions": [
     "core:default",

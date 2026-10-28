@@ -1,6 +1,12 @@
 <!--
-  版本: v52
+  版本: v53
   更新日志:
+  v53 (本次：拆出后台引擎，双架构):
+    - Mac 程序里分成两部分：这个全量版只管读书；另有一个看不见的“后台引擎”窗口（worker.html），
+      负责 Zotero 交来的书和菜单栏“后台翻译文件…”：不画页面，只做“提取 → 翻译 → 生成双栏 PDF → 存盘或挂回 Zotero”。
+    - 后台引擎用的是从全量版原样移植出来的核心模块（core/ 下五个文件，共约 480 行），翻出来的分段和译文与全量版逐段一致；
+      两边共用同一份缓存，后台翻过的书用全量版打开直接有译文。
+    - 在 Mac 程序里，全量版不再接收 Zotero 的链接、不再驱动菜单栏（交给后台引擎），免得两边同时翻同一本。
   v52 (本次：菜单栏的状态符号单独放大):
     - 小狐反馈小人的表情太小看不出来。把画里的 Zz（睡觉）、气泡（思考）、灯泡（灵感）从图上抠出来，
       和暂停的两条竖杠一起，当作和文字差不多高的符号排在两行字前面；小人的脸只用来认出这是 PDF译。
@@ -3164,11 +3170,12 @@ if(TAURI){
   // 拖进窗口
   try{TAURI.event.listen('tauri://drag-drop',function(ev){var ps=(ev.payload&&ev.payload.paths)||[];if(ps[0])openPath(ps[0])})}catch(e){}
   // Zotero 交过来的链接
-  try{if(TAURI.deepLink){TAURI.deepLink.getCurrent().then(function(us){(us||[]).forEach(handleDeepLink)}).catch(function(){});TAURI.deepLink.onOpenUrl(function(us){(us||[]).forEach(handleDeepLink)})}}catch(e){}
+  // v53：Zotero 链接交给后台引擎（worker.html）处理，全量版不再接
   // 菜单栏：状态栏文字一变就推一次（v46 的 trayPush 里再合并节流）
   try{new MutationObserver(function(){trayPush()}).observe($('trans-status'),{childList:true,characterData:true,subtree:true})}catch(e){}
   // 菜单里点了什么
-  try{TAURI.event.listen('tray-action',function(ev){var id=String(ev.payload||'');
+  // v53：菜单栏的操作（暂停、在访达中显示等）由后台引擎处理
+  if(window.PDFYI_READER_OWNS_TRAY)try{TAURI.event.listen('tray-action',function(ev){var id=String(ev.payload||'');
     if(id==='pause')togglePause();
     else if(id==='progress'){TAURI.core.invoke('show_main').catch(function(){});setTimeout(openPageProgress,200)}
     else if(id==='open_last'&&window._lastBiPdf)TAURI.core.invoke('open_path',{path:window._lastBiPdf}).catch(function(e){toast('打不开：'+e,'err')});
@@ -3247,6 +3254,7 @@ function trayLines(st){
   return [pct+q,fails?'⚠'+fails+' 页':(etaShort()||(fin+'/'+pages))]}
 function trayPush(){
   if(!window.__TAURI__)return;
+  if(!window.PDFYI_READER_OWNS_TRAY)return;// v53：Mac 程序里菜单栏由后台引擎驱动
   if(_trayTimer)return;// 每 0.3 秒最多推一次（不能用防抖：翻译时进度变化比 0.3 秒还密，会一直推不出去）
   _trayTimer=setTimeout(async function(){_trayTimer=null;var st=trayState();st.lines=trayLines(st);var j=JSON.stringify(st);if(j===_lastTrayJson)return;_lastTrayJson=j;
     try{st.image=await trayImageBytes(st.mood,st.lines)}catch(e){st.image=null}
