@@ -7,14 +7,16 @@
 //   5. 打开文件、在访达中显示
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri::{
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    PhysicalPosition,
     AppHandle, Emitter, Manager, WindowEvent, Wry,
 };
 
@@ -45,6 +47,60 @@ fn push_job(app: &AppHandle, job: String) {
         }
     }
     let _ = app.emit_to("worker", "pdfyi-job", ());
+}
+
+// v59：后台引擎是挂在菜单栏小鱼下面的面板。点到别处时收起；刚收起的那一下又点小鱼，不要马上又弹出来
+static LAST_HIDE: AtomicU64 = AtomicU64::new(0);
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+// 在点击位置正下方弹出面板；已经开着就收起
+fn toggle_popover(app: &AppHandle, at: Option<PhysicalPosition<f64>>) {
+    let Some(w) = app.get_webview_window("worker") else { return };
+    if w.is_visible().unwrap_or(false) {
+        let _ = w.hide();
+        return;
+    }
+    if now_ms().saturating_sub(LAST_HIDE.load(Ordering::Relaxed)) < 300 {
+        return;
+    }
+    let scale = w.scale_factor().unwrap_or(2.0);
+    let size = w.outer_size().map(|s| (s.width as f64, s.height as f64)).unwrap_or((380.0 * scale, 600.0 * scale));
+    let (x, y) = match at {
+        Some(p) => (p.x - size.0 / 2.0, p.y + 14.0 * scale),
+        None => {
+            // 没有点击位置（从菜单里打开）：放在屏幕右上角
+            let mw = w.current_monitor().ok().flatten().map(|m| m.size().width as f64).unwrap_or(1440.0 * scale);
+            (mw - size.0 - 12.0 * scale, 30.0 * scale)
+        }
+    };
+    let _ = w.set_position(PhysicalPosition::new(x.max(8.0 * scale), y));
+    let _ = w.show();
+    let _ = w.set_focus();
+    let _ = w.emit("popover-shown", ());
+}
+
+// 弹出选文件的窗口，选好的 PDF 交给后台引擎（菜单和面板上的“添加 PDF”都用这个）
+fn pick_files_job(app: &AppHandle) {
+    let h = app.clone();
+    app.dialog()
+        .file()
+        .add_filter("PDF", &["pdf"])
+        .pick_files(move |files| {
+            if let Some(fs) = files {
+                for f in fs {
+                    if let Ok(p) = f.into_path() {
+                        push_job(&h, format!("file:{}", p.to_string_lossy()));
+                    }
+                }
+            }
+        });
+}
+
+#[tauri::command]
+fn bg_pick(app: AppHandle) {
+    pick_files_job(&app);
 }
 
 // 后台引擎来取待办任务（取走就清空）
@@ -103,7 +159,7 @@ fn build_menu(app: &AppHandle, st: &TrayState) -> tauri::Result<Menu<Wry>> {
     m.append(&PredefinedMenuItem::separator(app)?)?;
     m.append(&MenuItem::with_id(app, "show", "显示窗口", true, Some("CmdOrCtrl+0"))?)?;
     // v54：打开后台引擎的窗口，看当前任务和日志
-    m.append(&MenuItem::with_id(app, "worker_show", "后台引擎状态", true, none)?)?;
+    m.append(&MenuItem::with_id(app, "worker_show", "打开后台面板", true, none)?)?;
     m.append(&CheckMenuItem::with_id(app, "notify", "翻完通知我", true, st.notify, none)?)?;
     m.append(&PredefinedMenuItem::separator(app)?)?;
     m.append(&MenuItem::with_id(app, "quit", "退出 PDF译", true, Some("CmdOrCtrl+Q"))?)?;
@@ -186,6 +242,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             tray_update,
             take_jobs,
+            bg_pick,
             zotero_attach,
             open_path,
             reveal_path,
@@ -217,30 +274,17 @@ fn main() {
                 .icon_as_template(true)
                 .tooltip("PDF译")
                 .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, position, .. } = event {
+                        toggle_popover(tray.app_handle(), Some(position));
+                    }
+                })
                 .on_menu_event(|app, ev| match ev.id.as_ref() {
                     "show" => show_window(app),
                     // 由这里弹对话框（不要让看不见的窗口去弹），选好的文件交给后台引擎
-                    "bg_open" => {
-                        let h = app.clone();
-                        app.dialog()
-                            .file()
-                            .add_filter("PDF", &["pdf"])
-                            .pick_files(move |files| {
-                                if let Some(fs) = files {
-                                    for f in fs {
-                                        if let Ok(p) = f.into_path() {
-                                            push_job(&h, format!("file:{}", p.to_string_lossy()));
-                                        }
-                                    }
-                                }
-                            });
-                    }
-                    "worker_show" => {
-                        if let Some(w) = app.get_webview_window("worker") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
-                    }
+                    "bg_open" => pick_files_job(app),
+                    "worker_show" => toggle_popover(app, None),
                     "quit" => app.exit(0),
                     // 暂停、打开逐页进度、打开上一份、在访达中显示、通知开关：交给页面处理
                     other => {
@@ -252,9 +296,17 @@ fn main() {
         })
         // 关窗口 = 藏起来，翻译接着跑；真正退出用菜单栏里的“退出 PDF译”
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            match event {
+                WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                // 面板（worker 窗口）点到别处就收起；它藏起来以后照样在翻
+                WindowEvent::Focused(false) if window.label() == "worker" => {
+                    LAST_HIDE.store(now_ms(), Ordering::Relaxed);
+                    let _ = window.hide();
+                }
+                _ => {}
             }
         })
         .build(tauri::generate_context!())

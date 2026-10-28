@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><title>PDF译 后台引擎</title>
-<!-- 后台引擎：Mac 程序里一个平时看不见的窗口。不画页面，只做“提取 → 翻译 → 生成双栏 PDF → 存盘或挂回 Zotero”。
-     菜单栏“后台引擎状态”会把它显示出来，看当前任务和日志。 -->
+<html lang="zh-CN"><head><meta charset="UTF-8"><title>PDF译 后台</title>
+<!-- 后台引擎：挂在菜单栏小鱼下面的小面板。平时看不见，照样在翻；左键点菜单栏的小鱼弹出，点别处收起。 -->
 <script>window.PDFYI_VENDOR='vendor/';window.PDFYI_WORKER=true;</script>
+<link rel="stylesheet" href="vendor/xiaoyu-fonts.css">
 <script src="vendor/pdf.min.js"></script>
 <script src="vendor/pdf-lib.min.js"></script>
 <script src="vendor/fontkit.umd.min.js"></script>
@@ -12,10 +12,172 @@
 <script src="core/translate.js"></script>
 <script src="core/bilingual.js"></script>
 <style>
-body{margin:0;padding:16px 20px;font:13px/1.6 -apple-system,"PingFang SC",sans-serif;background:#fffdf9;color:#3a2550}
-h3{margin:0 0 4px;font-size:15px} p{margin:0 0 10px;color:#6e5c86}
-ol{margin:0;padding-left:20px;font-size:12px} li.bad{color:#c0392b} li.ok{color:#3a2550}
+:root{
+  --bg:#F5F0FB;--paper:#FFFDF9;--paper2:#FBF7FE;
+  --ink:#3A2550;--ink2:#6E5C86;--mute:#9A8AAE;--faint:#BBAECD;
+  --edge:#3A2550;--shade:rgba(58,37,80,.16);--soft:#E4D8F5;--soft2:#D3C3EE;
+  --lav:#B7A0E4;--lav2:#D9CBF4;--lav3:#F0E9FB;
+  --tJ:#9668D2;--tR:#E3848F;--tS:#D6A233;--tL:#5E9FD6;--tP:#E07BA8;--ok:#5BC98F;--warn:#D2604E;
+  --grid:rgba(183,160,228,.34);
+  --px2:0 -2px 0 0 var(--edge),0 2px 0 0 var(--edge),-2px 0 0 0 var(--edge),2px 0 0 0 var(--edge);
+  --cute:'ZCOOL KuaiLe','PingFang SC',system-ui,sans-serif;
+  --pixel:'Pixelify Sans','PingFang SC',system-ui,sans-serif;
+  --sans:'PingFang SC','Hiragino Sans GB',system-ui,sans-serif;
+  --num:ui-rounded,'SF Pro Rounded',-apple-system,system-ui,sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#1C1528;--paper:#2A2139;--paper2:#30263F;
+  --ink:#F2EAFC;--ink2:#C4B3DB;--mute:#8F7FA6;--faint:#6A5C80;
+  --edge:#4B3A68;--shade:rgba(0,0,0,.42);--soft:#3A2E4C;--soft2:#4A3B5F;
+  --lav:#9C82D6;--lav2:#4A3A63;--lav3:#33284A;
+  --tJ:#B68BF0;--tR:#F09AA4;--tS:#E8BC5A;--tL:#84BCEB;--tP:#F097BF;--warn:#F08C79;
+  --grid:rgba(156,130,214,.16);color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{font:13px/1.55 var(--sans);color:var(--ink);background:var(--paper);
+  background-image:radial-gradient(var(--grid) 1px,transparent 1.2px);background-size:12px 12px;overflow:hidden;
+  -webkit-user-select:none;user-select:none}
+button,select{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--tJ);outline-offset:2px}
+#app{display:flex;flex-direction:column;height:100%}
+
+/* ── 顶部：小鱼的表情 + 一句话 ── */
+.hd{display:flex;align-items:center;gap:12px;padding:14px 16px 10px}
+.face{width:46px;height:42px;flex:none;background:var(--ink);-webkit-mask:var(--img) center/contain no-repeat;mask:var(--img) center/contain no-repeat}
+.hd-txt{flex:1;min-width:0}
+.brand{display:flex;align-items:baseline;gap:4px;line-height:1}
+.brand .pdf{font:600 15px var(--pixel);letter-spacing:.5px}
+.brand .yi{font:18px var(--cute);color:var(--tJ)}
+.brand .sub{font-size:12px;color:var(--mute);margin-left:4px}
+.say{margin-top:5px;font-size:13px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pxbtn{border:0;background:var(--paper);padding:5px 11px;cursor:pointer;box-shadow:var(--px2),3px 3px 0 0 var(--shade);font-size:12.5px}
+.pxbtn:hover{background:var(--lav3)}
+.pxbtn:active{transform:translate(1px,1px);box-shadow:var(--px2),1px 1px 0 0 var(--shade)}
+.pxbtn.main{background:var(--lav);color:#26153A}
+.pxbtn[disabled]{opacity:.45;cursor:default}
+
+/* ── 标签页 ── */
+.tabs{display:flex;margin:0 16px;box-shadow:var(--px2)}
+.tabs button{flex:1;border:0;background:var(--paper2);padding:6px 0;cursor:pointer;font-size:12.5px;color:var(--ink2)}
+.tabs button+button{box-shadow:-2px 0 0 0 var(--edge)}
+.tabs button.on{background:var(--lav2);color:var(--ink);font-weight:600}
+.badge{display:inline-block;min-width:16px;margin-left:5px;padding:0 4px;font:600 11px/16px var(--num);background:var(--warn);color:#fff}
+.badge[hidden]{display:none}
+.pane{flex:1;overflow:auto;padding:14px 16px 16px}
+.pane[hidden]{display:none}
+h3{margin:16px 0 6px;font:600 12.5px var(--sans);color:var(--ink2)}
+
+/* ── 现在：书页格子 ── */
+.book{background:var(--paper);box-shadow:var(--px2),4px 4px 0 0 var(--shade);padding:12px 12px 10px}
+.book-title{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.book-from{font-size:11.5px;color:var(--mute);margin-top:1px}
+.tiles{display:flex;flex-wrap:wrap;gap:var(--tg,3px);margin:11px 0 9px}
+.tile{width:var(--ts,12px);height:calc(var(--ts,12px)*1.3);background:var(--paper2);box-shadow:inset 0 0 0 1.5px var(--soft2)}
+.tile.d{background:var(--lav);box-shadow:inset 0 0 0 1.5px var(--tJ)}
+.tile.t{background:repeating-linear-gradient(135deg,var(--tJ) 0 2px,var(--lav2) 2px 4px);box-shadow:inset 0 0 0 1.5px var(--tJ)}
+.tile.f{background:var(--warn);box-shadow:inset 0 0 0 1.5px var(--warn)}
+.tile.u{background:repeating-linear-gradient(45deg,var(--soft2) 0 1.5px,transparent 1.5px 4px);box-shadow:inset 0 0 0 1.5px var(--faint)}
+.tile.e{background:var(--paper);box-shadow:inset 0 0 0 1.5px var(--soft)}
+@media (prefers-reduced-motion:no-preference){.tile.t{animation:breathe 1.6s ease-in-out infinite}}
+@keyframes breathe{50%{opacity:.55}}
+.stats{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.big{font:600 24px/1 var(--num);font-variant-numeric:tabular-nums}
+.big small{font-size:13px;color:var(--mute);margin-left:2px}
+.chip{font-size:12px;color:var(--ink2)}
+.chip.bad{color:var(--warn);font-weight:600}
+.idle{text-align:center;padding:16px 8px 6px;color:var(--ink2)}
+.idle .face{width:64px;height:58px;margin:0 auto}
+.idle p{margin:8px 0 0}
+.actions{display:flex;gap:10px;margin-top:12px}
+ul.lst{list-style:none;margin:0;padding:0}
+ul.lst li{display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1.5px dashed var(--soft2)}
+ul.lst li:last-child{border-bottom:0}
+.li-main{flex:1;min-width:0}
+.li-t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.li-s{font-size:11.5px;color:var(--mute)}
+.lnk{border:0;background:none;padding:2px 4px;color:var(--tJ);cursor:pointer;font-size:12px}
+.lnk:hover{text-decoration:underline}
+.empty{color:var(--mute);font-size:12.5px;padding:4px 2px}
+
+/* ── 日志：时间线 ── */
+.logbar{display:flex;align-items:center;gap:6px;margin-bottom:12px}
+.seg{display:flex;box-shadow:var(--px2)}
+.seg button{border:0;background:var(--paper2);padding:3px 10px;font-size:12px;cursor:pointer;color:var(--ink2)}
+.seg button+button{box-shadow:-2px 0 0 0 var(--edge)}
+.seg button.on{background:var(--lav2);color:var(--ink);font-weight:600}
+.logbar .sp{flex:1}
+ol.log{list-style:none;margin:0;padding:0 0 0 16px;position:relative}
+ol.log:before{content:"";position:absolute;left:5px;top:4px;bottom:4px;width:2px;background:var(--soft2)}
+ol.log li{position:relative;padding:3px 6px 9px 10px;-webkit-user-select:text;user-select:text}
+ol.log li:before{content:"";position:absolute;left:-15px;top:8px;width:8px;height:8px;background:var(--paper);box-shadow:0 0 0 2px var(--dot,var(--lav))}
+ol.log li.bad:before{background:var(--warn);box-shadow:0 0 0 2px var(--warn)}
+.lg-h{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--mute)}
+.lg-h time{font:11.5px var(--num);font-variant-numeric:tabular-nums}
+.tag{padding:0 5px;font-size:11px;color:var(--ink);background:color-mix(in srgb,var(--dot,var(--lav)) 24%,transparent)}
+.lg-m{margin-top:2px;font-size:12.5px;line-height:1.5;color:var(--ink);word-break:break-all}
+ol.log li.bad{background:linear-gradient(90deg,color-mix(in srgb,var(--warn) 10%,transparent),transparent 75%)}
+ol.log li.bad .lg-m{color:var(--warn)}
+ol.log li.more{cursor:pointer}
+ol.log li.more .lg-m:after{content:'  展开';color:var(--tJ);font-size:11.5px}
+ol.log li.open .lg-m:after{content:'  收起'}
+.lg-full{display:none;margin-top:6px;padding:8px 10px;background:var(--paper2);box-shadow:inset 0 0 0 1.5px var(--soft2);font-size:12px;line-height:1.55;color:var(--ink2);white-space:pre-wrap;max-height:220px;overflow:auto}
+ol.log li.open .lg-full{display:block}
+
+/* ── 菜单栏设置 ── */
+.preview{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.bar{display:flex;align-items:center;justify-content:flex-end;gap:14px;height:30px;padding:0 12px;font-size:12.5px}
+.bar.light{background:#f6f6f8;color:#1d1d1f;box-shadow:inset 0 0 0 1px #e2e2e6}
+.bar.dark{background:#232026;color:#fff}
+.bar canvas{height:22px}
+.field{display:flex;align-items:center;gap:10px;padding:7px 0}
+.field label{flex:1}
+.field select{background:var(--paper);border:0;box-shadow:var(--px2);padding:4px 6px;min-width:140px}
+.check{display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer}
+.check input{accent-color:var(--tJ);width:15px;height:15px}
+.note{font-size:12px;color:var(--mute);margin-top:8px}
 </style>
-</head><body><div id="st">后台引擎已启动，空闲。</div>
+</head><body>
+<div id="app">
+  <header class="hd">
+    <div class="face" id="face" style="--img:url(vendor/tray/face-sleeping.png)"></div>
+    <div class="hd-txt">
+      <div class="brand"><span class="pdf">PDF</span><span class="yi">译</span><span class="sub">后台</span></div>
+      <div class="say" id="say">后台引擎已启动。</div>
+    </div>
+    <button class="pxbtn" id="btn-pause" disabled>暂停</button>
+  </header>
+  <nav class="tabs" role="tablist">
+    <button data-tab="now" class="on" role="tab">现在</button>
+    <button data-tab="log" role="tab">日志<span class="badge" id="log-bad" hidden></span></button>
+    <button data-tab="bar" role="tab">菜单栏</button>
+  </nav>
+  <section class="pane" id="tab-now">
+    <div id="job"></div>
+    <div class="actions"><button class="pxbtn main" id="btn-add">添加 PDF</button><button class="pxbtn" id="btn-reader">打开阅读器</button></div>
+    <h3>排队</h3><ul class="lst" id="queue"></ul>
+    <h3>最近翻好</h3><ul class="lst" id="recent"></ul>
+  </section>
+  <section class="pane" id="tab-log" hidden>
+    <div class="logbar">
+      <div class="seg" id="log-filter"><button data-f="all" class="on">全部</button><button data-f="bad">出错</button><button data-f="engine">引擎</button></div>
+      <span class="sp"></span>
+      <button class="lnk" id="log-copy">复制</button><button class="lnk" id="log-clear">清空</button>
+    </div>
+    <ol class="log" id="log"></ol>
+  </section>
+  <section class="pane" id="tab-bar" hidden>
+    <div class="preview">
+      <div class="bar light"><span>Wi‑Fi</span><canvas id="pv-light" height="44"></canvas><span>10:42</span></div>
+      <div class="bar dark"><span>Wi‑Fi</span><canvas id="pv-dark" height="44"></canvas><span>10:42</span></div>
+    </div>
+    <div class="field"><label for="set-top">上面一行</label><select id="set-top"></select></div>
+    <div class="field"><label for="set-bottom">下面一行</label><select id="set-bottom"></select></div>
+    <label class="check"><input type="checkbox" id="set-face">显示小鱼的脸</label>
+    <label class="check"><input type="checkbox" id="set-sym">显示状态符号（睡觉、思考、灵感、暂停）</label>
+    <label class="check"><input type="checkbox" id="set-fail">有失败的页时，下面一行改成提醒</label>
+    <p class="note">预览按翻到第 18 页、共 30 页、还要 6 分钟、1 页失败来画；空闲时菜单栏上只有小鱼和 Zz。</p>
+  </section>
+</div>
 <script src="worker.js"></script>
 </body></html>
