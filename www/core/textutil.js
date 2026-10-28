@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v56.1.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v57.html 原样移植生成，逻辑与全量版一致。
 // 文字工具：拼接、康熙部首、上标、分栏、句末判断、断行。全部是纯函数。
 var VENDOR=window.PDFYI_VENDOR||'vendor/';
 var _TERM=/[.!?。！？…]["”’)\]）」』》]*(\d{0,3}|[⁰¹²³⁴⁵⁶⁷⁸⁹*†‡]{0,3})$/;
@@ -94,8 +94,8 @@ function extractParas(tc,viewport){
   return{texts:texts,bboxes:bboxes,pdfH:pdfH,pdfW:pdfW,rawLines:rawLines,rawYs:rawYs,rawFs:rawFs,bodyFs:bodyFs}}
 function groupsToBboxes(groups,ys){
   if(!groups||!ys)return [];
-  return groups.map(function(g){var mn=Infinity,mx=-Infinity;g.forEach(function(i){var y=ys[i];if(y==null)return;if(y<mn)mn=y;if(y>mx)mx=y});
-    return isFinite(mn)?{y:mn,h:mx-mn+14}:{y:0,h:14}})}
+  return groups.map(function(g){var mn=Infinity,mx=-Infinity,y0=null;g.forEach(function(i){var y=ys[i];if(y==null)return;if(y0==null)y0=y;if(y<mn)mn=y;if(y>mx)mx=y});
+    return isFinite(mn)?{y:mn,h:mx-mn+14,y0:y0}:{y:0,h:14}})}
 function _lines(r){var out=[];(r.rawLines||[]).forEach(function(x,i){var t=String(x||'').replace(/\s+/g,' ').trim();if(t)out.push({s:t,i:i})});return out}
 function _normLine(x){return x.toLowerCase().replace(/[\d#]+/g,'').replace(/[^a-z\u00c0-\u024f\u4e00-\u9fff]+/g,' ').trim()}
 function _headingLike(x){
@@ -110,7 +110,7 @@ function _sentEnd(t){
   return -1}
 function groupRaw(lines,ys){
   var texts=[],bboxes=[],cur=[],cy=[];
-  function flush(){var t=_jnAll(cur).replace(/\s+/g,' ').trim();if(t.length>2){texts.push(t);var mn=cy.length?Math.min.apply(null,cy):0,mx=cy.length?Math.max.apply(null,cy):0;bboxes.push({y:mn,h:mx-mn+14})}cur=[];cy=[]}
+  function flush(){var t=_jnAll(cur).replace(/\s+/g,' ').trim();if(t.length>2){texts.push(t);var mn=cy.length?Math.min.apply(null,cy):0,mx=cy.length?Math.max.apply(null,cy):0;bboxes.push({y:mn,h:mx-mn+14,y0:cy.length?cy[0]:null})}cur=[];cy=[]}
   lines.forEach(function(l,i){if(!l||!String(l).trim()){flush();return}cur.push(l);if(ys[i]!=null)cy.push(ys[i])});flush();
   return {texts:texts,bboxes:bboxes}}
 function getMsgContent(d){var c=d&&d.choices&&d.choices[0]&&d.choices[0].message?d.choices[0].message.content:'';if(c==null)return '';return typeof c==='string'?c:JSON.stringify(c)}

@@ -1,6 +1,6 @@
 [package]
 name = "pdf-yi"
-version = "0.56.1"
+version = "0.57.0"
 description = "PDF译：左边原版、右边译文"
 edition = "2021"
 
