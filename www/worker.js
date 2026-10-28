@@ -88,7 +88,10 @@ async function run(j){
   prog.phase='building';refresh();
   var pdf=await buildBilingualPdf();
   var out=await saveOut(j,pdf);lastOut=out.path;
-  addRecent({title:baseOf(j.path),path:out.path,zotero:out.zotero,pages:totalPages,fails:prog.failParas,at:Date.now()});
+  var p1T=(pageTextCache[1]||[]).join('\n');
+  var mDoi=p1T.match(/\b10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+/);
+  var itemDoi=mDoi?mDoi[0].replace(/[.,;)]+$/,''):'';
+  addRecent({title:baseOf(j.path),path:out.path,source:j.path,doi:itemDoi,p1Text:p1T,zotero:out.zotero,pages:totalPages,fails:prog.failParas,at:Date.now()});
   log('完成：'+baseOf(j.path)+(out.zotero?'，已挂回 Zotero':'，已存到原文件旁边'));
   prog.phase='done';prog.doneUntil=Date.now()+10000;refresh();setTimeout(refresh,10200);
   notify(out.zotero?'双栏 PDF 已经挂回 Zotero':'双栏 PDF 已存到原文件旁边',baseOf(j.path)+'_双栏，'+totalPages+' 页，'+prog.failParas+' 段失败')}
@@ -216,8 +219,9 @@ function renderNow(){
       +(Date.now()<prog.doneUntil?'《'+esc(prog.title)+'》翻好了。':'把 PDF 交给我，翻完放回原处。')+'</p></div>'}
   $('job').innerHTML=h;
   $('queue').innerHTML=queue.length?queue.map(function(x){return '<li><div class="li-main"><div class="li-t">'+esc(baseOf(x.path))+'</div><div class="li-s">'+(x.key?'来自 Zotero':'本地文件')+'</div></div></li>'}).join(''):'<li class="empty">没有排队的书。</li>';
-  $('recent').innerHTML=recent.length?recent.map(function(r,i){return '<li><div class="li-main"><div class="li-t">'+esc(r.title)+'</div><div class="li-s">'+ago(r.at)+'，'+r.pages+' 页'+(r.fails?'，'+r.fails+' 段失败':'')+(r.zotero?'，已挂回 Zotero':'')+'</div></div>'
-    +(r.path?'<button class="lnk" data-open="'+i+'">打开</button><button class="lnk" data-reveal="'+i+'">在访达中显示</button>':'')+'</li>'}).join(''):'<li class="empty">还没有翻好的书。</li>'}
+  $('recent').innerHTML=recent.length?recent.map(function(r,i){return '<li><div class="li-main"><div class="li-t">'+esc(r.title)+'</div><div class="li-s">'+ago(r.at)+'，'+r.pages+' 页'+(r.fails?'，'+r.fails+' 段失败':'')+(r.zotero?'，已在 Zotero':'')+'</div></div>'
+    +(r.path?'<button class="lnk" data-open="'+i+'">打开</button><button class="lnk" data-reveal="'+i+'">在访达中显示</button>':'')
+    +(r.zotero?'<span class="li-s">已在 Zotero</span>':(r.path&&r.source?'<button class="lnk" data-zotero="'+i+'"'+(r.importing?' disabled':'')+'>'+(r.importing?'加入中…':'加入 Zotero')+'</button>':''))+'</li>'}).join(''):'<li class="empty">还没有翻好的书。</li>'}
 
 // ══ 面板：日志 ══
 var TYPE_DOT={'引擎':'var(--lav)','翻译':'var(--tL)','合并':'var(--tS)','术语表':'var(--tP)','提取':'var(--faint)','任务':'var(--warn)','提示':'var(--warn)','清理规则':'var(--tJ)','结构扫描':'var(--tJ)'};
@@ -256,8 +260,36 @@ function bindUI(){
   $('btn-pause').onclick=togglePause;
   $('btn-add').onclick=function(){if(T)T.core.invoke('bg_pick').catch(function(e){log('打不开选文件的窗口：'+e,false)})};
   $('btn-reader').onclick=function(){if(T)T.core.invoke('show_main').catch(function(){})};
-  $('recent').onclick=function(e){var o=e.target.dataset.open,r=e.target.dataset.reveal,i=o!=null?o:r;if(i==null||!T)return;var it=recent[+i];if(!it||!it.path)return;
+  $('recent').onclick=function(e){var o=e.target.dataset.open,r=e.target.dataset.reveal,z=e.target.dataset.zotero,i=o!=null?o:r;if(z!=null){importRecent(+z);return}if(i==null||!T)return;var it=recent[+i];if(!it||!it.path)return;
     T.core.invoke(o!=null?'open_path':'reveal_path',{path:it.path}).catch(function(err){log('打不开：'+err,false)})};
+async function importRecent(i){
+  var r=recent[i];if(!T||!r||r.zotero||r.importing||!r.path||!r.source)return;
+  r.importing=true;renderNow();log('正在加入 Zotero：'+r.title);
+  try{
+    var doi=r.doi||'';
+    if(!doi&&r.p1Text){
+      var mD=r.p1Text.match(/\b10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+/);
+      if(mD)doi=mD[0].replace(/[.,;)]+$/,'');
+    }
+    var csl=null;
+    if(!doi&&r.p1Text&&activeModel){
+      try{
+        var prompt='Extract bibliographic metadata from this first page of an academic document as CSL-JSON.\n'
+          +'Return ONLY a valid JSON object matching CSL-JSON format (type, title, author: [{given, family}], container-title, issued: {date-parts: [[year]]}). No markdown, no explanation.\n\n'
+          +r.p1Text.slice(0,3000);
+        var body={model:getMagpieModel(),messages:[{role:'user',content:prompt}],temperature:0};
+        var resp=await fetch(getMagpieUrl(),{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+getKey()},body:JSON.stringify(body)});
+        if(resp.ok){
+          var data=await resp.json(),raw=getMsgContent(data),clean=raw.replace(/```[a-z]*\n?/g,'').trim();
+          var j0=clean.indexOf('{'),j1=clean.lastIndexOf('}');
+          if(j0>=0&&j1>j0)csl=JSON.parse(clean.slice(j0,j1+1));
+        }
+      }catch(e){console.warn('CSL extraction failed:',e)}
+    }
+    var raw=await T.core.invoke('zotero_import',{body:{source_path:r.source,output_path:r.path,title:r.title,doi:doi,csl:csl}}),ans={};try{ans=JSON.parse(raw)}catch(e){}
+    if(!ans.ok)throw new Error(ans.error||raw||'Zotero 没有确认导入');
+    r.zotero=true;r.importing=false;lsSet('pdfyi_recent',JSON.stringify(recent));log('已加入 Zotero：'+(ans.title||r.title));refresh()}
+  catch(e){r.importing=false;log('加入 Zotero 失败：'+(e.message||e),false);refresh()}}
   document.querySelectorAll('#log-filter button').forEach(function(b){b.onclick=function(){logFilter=b.dataset.f;document.querySelectorAll('#log-filter button').forEach(function(x){x.classList.toggle('on',x===b)});renderLog()}});
   $('log-copy').onclick=function(){var t=logText();(navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(function(){$('log-copy').textContent='已复制'},function(){$('log-copy').textContent='复制失败'})};
   $('log-clear').onclick=function(){LOG=[];logSeenBad=0;logOpen={};renderLog()};

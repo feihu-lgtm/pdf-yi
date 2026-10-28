@@ -188,15 +188,15 @@ fn tray_update(app: AppHandle, state: TrayState) -> Result<(), String> {
     Ok(())
 }
 
-// 把双栏 PDF 交给 Zotero 插件（插件在 Zotero 自带的本地服务上注册了 /pdfyi/attach）
-#[tauri::command]
-fn zotero_attach(body: serde_json::Value) -> Result<String, String> {
-    let resp = ureq::post("http://127.0.0.1:23119/pdfyi/attach")
+// Zotero 插件在本地服务注册的接口；由原生层请求，网页不需要跨域权限。
+fn zotero_post(endpoint: &str, body: serde_json::Value) -> Result<String, String> {
+    let url = format!("http://127.0.0.1:23119{}", endpoint);
+    match ureq::post(&url)
         .set("Content-Type", "application/json")
         .set("Zotero-Allowed-Request", "true")
         .timeout(Duration::from_secs(120))
-        .send_json(body);
-    match resp {
+        .send_json(body)
+    {
         Ok(r) => r.into_string().map_err(|e| e.to_string()),
         Err(ureq::Error::Status(code, r)) => {
             let t = r.into_string().unwrap_or_default();
@@ -204,6 +204,18 @@ fn zotero_attach(body: serde_json::Value) -> Result<String, String> {
         }
         Err(e) => Err(format!("连不上 Zotero（Zotero 开着吗？插件装了吗？）：{}", e)),
     }
+}
+
+// 把双栏 PDF 交给 Zotero 插件挂回原条目。
+#[tauri::command]
+fn zotero_attach(body: serde_json::Value) -> Result<String, String> {
+    zotero_post("/pdfyi/attach", body)
+}
+
+// 本地翻好的原文和双栏 PDF 一起导入 Zotero。
+#[tauri::command]
+fn zotero_import(body: serde_json::Value) -> Result<String, String> {
+    zotero_post("/pdfyi/import", body)
 }
 
 // 用系统默认程序打开文件（“打开上一份双栏 PDF”）
@@ -244,6 +256,7 @@ fn main() {
             take_jobs,
             bg_pick,
             zotero_attach,
+            zotero_import,
             open_path,
             reveal_path,
             show_main

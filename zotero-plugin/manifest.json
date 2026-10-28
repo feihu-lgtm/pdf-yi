@@ -1,15 +1,15 @@
 {
   "manifest_version": 2,
   "name": "PDF译",
-  "version": "0.45.0",
-  "description": "在 PDF 附件上右键“用 PDF译 翻译”，翻完把左原文右译文的双栏 PDF 挂回同一个条目。",
+  "version": "0.63.0",
+  "description": "在 PDF 附件上右键翻译并挂回双栏 PDF，或从 PDF译 一键导入原文与双栏 PDF，按原文内容去重并尝试识别元数据。",
   "author": "小狐",
   "applications": {
     "zotero": {
       "id": "pdfyi@xiaohu.local",
       "update_url": "https://localhost/pdfyi-updates.json",
       "strict_min_version": "6.999",
-      "strict_max_version": "7.1.*"
+      "strict_max_version": "200.*"
     }
   }
 }
