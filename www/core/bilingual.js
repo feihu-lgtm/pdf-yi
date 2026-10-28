@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v56.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v56.1.html 原样移植生成，逻辑与全量版一致。
 // 双栏 PDF：左边原页（矢量，按裁剪盒和 /Rotate 转正），右边译文按原文高度对齐、放不下缩字号或加续页。
 var PDFLib=null,_fontkitP=null,_cjkFontP=null,_bpBusy=false,highlights=[],_pageNotes={};
 function pickFontFile(){return Promise.reject(new Error('找不到中文字体文件 vendor/fonts/NotoSansSC-Sub.ttf'))}
@@ -54,7 +54,8 @@ async function buildBilingualPdf(){
       var pg=await pdfDoc.getPage(p),vp=pg.getViewport({scale:1}),box=pg.view,angle=((pg.rotate%360)+360)%360;
       var zh=memCache[p],bbs=(pageBboxCache[p]&&pageBboxCache[p].bboxes)||[],note=null;
       if(!zh||!zh.length){note=_pageNotes[p]||'这一页还没有翻译。'}
-      var pl={p:p,pg:pg,vp:vp,box:box,angle:angle,zh:zh,bbs:bbs,note:note,col:null};
+      var pl={p:p,pg:pg,vp:vp,box:box,angle:angle,zh:zh,bbs:bbs,note:note,col:null,twoCol:false};
+      if(!note){try{var tcP=await pg.getTextContent();_colOrder(tcP.items,vp.width);pl.twoCol=!!_colOrder.info}catch(e){}}
       if(!note&&angle===0&&bpColumns())pl.col=await _pageColumns(pg,vp.width,pageTextCache[p]||[],zh.length,bbs);
       plans.push(pl);if(angle===0){idx.push(p-1);if(pl.col)idx.push(p-1)}}
     // 一次复制整本，页面之间共用字体和图片（按栏拆的页复制两份，资源仍共用）
@@ -67,8 +68,10 @@ async function buildBilingualPdf(){
         if(!R||!R.asArray){keep.push(A.get(i));continue}var r=R.asArray().map(function(n){return n.asNumber?n.asNumber():0});var cx=(r[0]+r[2])/2;if(cx>=x0&&cx<=x1)keep.push(A.get(i))}
       page.node.set(PN.of('Annots'),ctx.obj(keep))};
     // 把一组段落的译文排进 [tx,ty,tw,th] 这块区域；放不下就加“续”页（大小 contSize）
-    var drawTrans=function(page,tx,ty,tw,th,list,contSize,contTitle,contSplit){
+    var drawTrans=function(page,tx,ty,tw,th,list,contSize,contTitle,contSplit,byHeight){
       if(contSplit==null)contSplit=contSize[0]/2;
+      // v56.1：单栏按原文高度从上到下排（PDF 里先画的页脚不会把正文挤走）；没有高度的段落按原顺序放在后面
+      if(byHeight)list=list.map(function(pa,i){return {pa:pa,i:i}}).sort(function(a,b){var x=a.pa.anchor,y=b.pa.anchor;if(x==null&&y==null)return a.i-b.i;if(x==null)return 1;if(y==null)return -1;return (y-x)||(a.i-b.i)}).map(function(o){return o.pa});
       var m=Math.max(14,tw*0.06),x0=tx+m,colW=tw-2*m,top=th-m,bot=m;
       var base=bpFontSize()*Math.min(1.15,Math.max(0.85,tw/595)),minFs=Math.max(7.5,base-3.5),fs=base,plan=null;
       // 排一遍：每段放在原文的高度，上一段挤下来就往下让
@@ -127,7 +130,7 @@ async function buildBilingualPdf(){
           page.drawRectangle({x:cx0+cw,y:oy,width:tw,height:H,color:WHITE});
           page.drawLine({start:{x:cx0+cw,y:oy},end:{x:cx0+cw,y:oy+H},thickness:0.6,color:LINE});
           page.drawText(p+(c?' 右栏':' 左栏'),{x:cx0+sw-46,y:oy+H-12,size:7,font:font,color:MUTE});
-          drawTrans(page,cx0+cw,oy,tw,H,paras.filter(function(pa){return pl.col.cols[pa.i]===c}),[sw,H],'第 '+p+' 页'+(c?'右栏':'左栏')+'（续）',cw);
+          drawTrans(page,cx0+cw,oy,tw,H,paras.filter(function(pa){return pl.col.cols[pa.i]===c}),[sw,H],'第 '+p+' 页'+(c?'右栏':'左栏')+'（续）',cw,true);
           addHighlights(page,p,W,H,box[0],oy,cx0,cx1)}
       }else{
         var ox=0,oy=0,page;
@@ -145,7 +148,7 @@ async function buildBilingualPdf(){
         page.drawLine({start:{x:ox+W,y:oy},end:{x:ox+W,y:oy+H},thickness:0.6,color:LINE});
         page.drawText(String(p),{x:ox+W*2-Math.max(18,W*0.06),y:oy+H-Math.max(18,W*0.06)*0.6,size:7,font:font,color:MUTE});
         if(pl.note){var m0=Math.max(18,W*0.06);_wrap(pl.note,font,9,W-2*m0).forEach(function(l,i){page.drawText(l,{x:ox+W+m0,y:oy+H-m0-9-i*13,size:9,font:font,color:MUTE})})}
-        else drawTrans(page,ox+W,oy,W,H,paras,[W*2,H],'第 '+p+' 页（续）');
+        else drawTrans(page,ox+W,oy,W,H,paras,[W*2,H],'第 '+p+' 页（续）',null,!pl.twoCol);
         addHighlights(page,p,W,H,ox,oy,null,null)}
       if(p%5===0)await Promise.resolve();// 后台不用计时器让出
     }

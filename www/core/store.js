@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v56.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v56.1.html 原样移植生成，逻辑与全量版一致。
 // 缓存：IndexedDB “PDFTransCache”，pages 存译文（:p页号）和原文分段（:en页号），annotations 存清理规则（:clean）。
 var cacheDB=null;
 function openCacheDB(){return new Promise(function(resolve){

@@ -1,5 +1,5 @@
 import re, json, os, sys
-READER = '/mnt/user-data/outputs/pdf-reader-v56.html'
+READER = '/mnt/user-data/outputs/pdf-reader-v56.1.html'
 OUT = '/home/claude/build/www/core'
 os.makedirs(OUT, exist_ok=True)
 s = open(READER, encoding='utf-8').read(); js = s[s.index('<script>\n'):]
@@ -16,7 +16,7 @@ def fn(name):
 def line(prefix):
     m = re.search(r'(?m)^' + re.escape(prefix) + r'[^\n]*', js); assert m, prefix; return m.group(0)
 def take(*names): return '\n'.join(fn(n) for n in names)
-HEAD = '// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v56.html 原样移植生成，逻辑与全量版一致。\n'
+HEAD = '// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v56.1.html 原样移植生成，逻辑与全量版一致。\n'
 
 # ── textutil.js：纯文字处理，不碰页面 ──
 textutil = HEAD + '''// 文字工具：拼接、康熙部首、上标、分栏、句末判断、断行。全部是纯函数。

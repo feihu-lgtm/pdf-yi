@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v56.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v56.1.html 原样移植生成，逻辑与全量版一致。
 // 翻译：只走 Magpie。配置和全量版共用同一份浏览器存储（端点、模型）。
 var activeModel='magpie';
 function getMagpieUrl(){var e='';try{e=(localStorage.getItem('pdfyi_magpie_endpoint')||'').trim()}catch(x){}var u=(e||'http://127.0.0.1:3426/v1').replace(/\/+$/,'');
