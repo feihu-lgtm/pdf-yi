@@ -1931,8 +1931,10 @@ async function listAllIDBKeys(store){return new Promise(function(resolve){
 async function loadCacheFromIDB(){
   memCache={};savedEnCache={};var loaded=0;var _pl=allPageNums();
   // 先尝试精确匹配
-  for(var _i=0;_i<_pl.length;_i++){var p=_pl[_i];var v=await idbGet('pages',cacheKey+':p'+p);if(v&&Array.isArray(v)&&v.length>0){memCache[p]=v;loaded++;
-    var se=await idbGet('pages',cacheKey+':en'+p);if(se&&Array.isArray(se.texts)&&se.texts.length===v.length)savedEnCache[p]=se}}
+  for(var _i=0;_i<_pl.length;_i++){var p=_pl[_i];var v=await idbGet('pages',cacheKey+':p'+p);
+    if(v&&Array.isArray(v)&&v.length>0&&!v.some(function(t){return String(t).indexOf('__TRANSFAIL__')===0})){
+      memCache[p]=v;loaded++;
+      var se=await idbGet('pages',cacheKey+':en'+p);if(se&&Array.isArray(se.texts)&&se.texts.length===v.length)savedEnCache[p]=se}}
   if(loaded>0){
     var ann=await idbGet('annotations',cacheKey+':hl');if(ann&&Array.isArray(ann))highlights=ann;
     console.log('Cache loaded (exact): '+loaded+' pages, key='+cacheKey);return;
@@ -1947,7 +1949,9 @@ async function loadCacheFromIDB(){
   oldKeys.forEach(function(k){var m=k.match(/^(.+):p\d+$/);if(m)oldPrefix=m[1]});
   if(!oldPrefix){console.log('Could not determine old prefix');return}
   console.log('Migrating cache from old key: '+oldPrefix+' → '+cacheKey);
-  for(var _j=0;_j<_pl.length;_j++){var p=_pl[_j];var v=await idbGet('pages',oldPrefix+':p'+p);if(v&&Array.isArray(v)&&v.length>0){memCache[p]=v;loaded++;await saveCacheToIDB(p,v)}}
+  for(var _j=0;_j<_pl.length;_j++){var p=_pl[_j];var v=await idbGet('pages',oldPrefix+':p'+p);
+    if(v&&Array.isArray(v)&&v.length>0&&!v.some(function(t){return String(t).indexOf('__TRANSFAIL__')===0})){
+      memCache[p]=v;loaded++;await saveCacheToIDB(p,v)}}
   var ann=await idbGet('annotations',oldPrefix+':hl');if(ann&&Array.isArray(ann)){highlights=ann;saveAnnotationsToIDB();}
   if(loaded>0){toast('已从旧缓存迁移 '+loaded+' 页 ✓','ok');console.log('Cache migrated: '+loaded+' pages');}
 }

@@ -64,8 +64,10 @@ async function run(j){
   prog={pages:totalPages,done:0,failPages:0,failParas:0,doneTimes:[],phase:'translating',doneUntil:0,title:baseOf(j.path),from:j.key?'来自 Zotero':'本地文件'};
   pageState=[];for(var i=0;i<=totalPages;i++)pageState.push('w');refresh();
   // 已有的缓存（全量版翻过的也算）
-  for(var p=1;p<=totalPages;p++){var v=await idbGet('pages',cacheKey+':p'+p);if(v&&Array.isArray(v)&&v.length){memCache[p]=v;cachedAtLoad[p]=1;
-    var se=await idbGet('pages',cacheKey+':en'+p);if(se&&Array.isArray(se.texts)&&se.texts.length===v.length)savedEnCache[p]=se}}
+  for(var p=1;p<=totalPages;p++){var v=await idbGet('pages',cacheKey+':p'+p);
+    if(v&&Array.isArray(v)&&v.length&&!v.some(function(t){return String(t).indexOf('__TRANSFAIL__')===0})){
+      memCache[p]=v;cachedAtLoad[p]=1;
+      var se=await idbGet('pages',cacheKey+':en'+p);if(se&&Array.isArray(se.texts)&&se.texts.length===v.length)savedEnCache[p]=se}}
   // 清理规则：用这本书确认过的；没有就自动识别（隐藏页眉页脚），并存下来，全量版打开时也按它来
   var saved=await idbGet('annotations',cacheKey+':clean');
   if(saved&&saved.running)cleanRules=saved;
