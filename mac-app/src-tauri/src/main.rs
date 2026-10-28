@@ -76,6 +76,8 @@ fn build_menu(app: &AppHandle, st: &TrayState) -> tauri::Result<Menu<Wry>> {
     m.append(&MenuItem::with_id(app, "reveal", "在访达中显示", st.has_last, none)?)?;
     m.append(&PredefinedMenuItem::separator(app)?)?;
     m.append(&MenuItem::with_id(app, "show", "显示窗口", true, Some("CmdOrCtrl+0"))?)?;
+    // v54：打开后台引擎的窗口，看当前任务和日志
+    m.append(&MenuItem::with_id(app, "worker_show", "后台引擎状态", true, none)?)?;
     m.append(&CheckMenuItem::with_id(app, "notify", "翻完通知我", true, st.notify, none)?)?;
     m.append(&PredefinedMenuItem::separator(app)?)?;
     m.append(&MenuItem::with_id(app, "quit", "退出 PDF译", true, Some("CmdOrCtrl+Q"))?)?;
@@ -176,6 +178,12 @@ fn main() {
                 .menu(&menu)
                 .on_menu_event(|app, ev| match ev.id.as_ref() {
                     "show" => show_window(app),
+                    "worker_show" => {
+                        if let Some(w) = app.get_webview_window("worker") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
                     "quit" => app.exit(0),
                     // 暂停、打开逐页进度、打开上一份、在访达中显示、通知开关：交给页面处理
                     other => {

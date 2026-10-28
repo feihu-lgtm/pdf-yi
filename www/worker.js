@@ -10,7 +10,7 @@ var CMAP=VENDOR+'cmaps/';
 
 // ── 核心模块里用到的几个界面函数：后台没有界面，换成记日志 ──
 var LOG=[];
-window.addTransLog=function(page,input,output,model,type,ok){LOG.unshift({t:new Date().toLocaleTimeString(),page:page,type:type||'翻译',ok:ok!==false,msg:String(output||'').slice(0,300)});if(LOG.length>80)LOG.length=80};
+window.addTransLog=function(page,input,output,model,type,ok){LOG.unshift({t:new Date().toLocaleTimeString(),page:page,type:type||'翻译',ok:ok!==false,msg:String(output||'').slice(0,300)});if(LOG.length>80)LOG.length=80;if(typeof renderStatus==='function')renderStatus()};
 window.toast=function(msg,kind){if(kind==='err')addTransLog('?','',msg,'magpie','提示',false)};
 window.setStatus=function(){};window.setProgress=function(){};
 
@@ -22,7 +22,7 @@ var notifyOn=true;try{notifyOn=localStorage.getItem('pdfyi_notify')!=='0'}catch(
 var queue=[],job=null,paused=false,lastOut=null;
 var prog={pages:0,done:0,failPages:0,failParas:0,doneTimes:[],phase:'idle',doneUntil:0};
 function enqueue(j){if(!j||!j.path)return;if(queue.some(function(x){return x.path===j.path})||(job&&job.path===j.path))return;queue.push(j);tray();next()}
-function next(){if(job||!queue.length)return;job=queue.shift();run(job).catch(function(e){addTransLog('?','',String(e&&e.message||e),'magpie','任务',false);notify('这一本没翻成',baseOf(job.path)+'：'+(e&&e.message||e))}).finally(function(){job=null;prog.phase='idle';tray();setTimeout(next,300)})}
+function next(){if(job||!queue.length)return;job=queue.shift();run(job).catch(function(e){addTransLog('?','',String(e&&e.message||e),'magpie','任务',false);notify('这一本没翻成',baseOf(job.path)+'：'+(e&&e.message||e))}).finally(function(){job=null;prog.phase='idle';tray();Promise.resolve().then(next)})}// 不用计时器：看不见的窗口里计时器可能被冻结
 function baseOf(p){return p.slice(p.lastIndexOf('/')+1).replace(/\.pdf$/i,'')}
 function dirOf(p){var i=p.lastIndexOf('/');return i>=0?p.slice(0,i):'.'}
 
@@ -126,7 +126,7 @@ async function trayImageBytes(mood,lines){
   var c=await trayCanvas(mood,TRAY_SYM[mood]||null,lines);
   var blob=await new Promise(function(r){c.toBlob(r,'image/png')});
   return blob?Array.from(new Uint8Array(await blob.arrayBuffer())):null}
-var trayTimer=null,lastTrayJson='';
+var trayBusy=false,trayAgain=false,lastTrayJson='';
 function etaText(){var left=prog.pages-prog.done,ts=prog.doneTimes;if(left<=0||ts.length<3)return '';var mins=(ts[ts.length-1]-ts[0])/60000,rate=(ts.length-1)/Math.max(mins,0.05),m=Math.round(left/rate);return m<1?'<1 分':'约 '+m+' 分'}
 function trayState(){
   var busy=prog.phase==='translating',pct=prog.pages?Math.floor(prog.done/prog.pages*100)+'%':'',qn=queue.length?' +'+queue.length:'';
@@ -139,11 +139,20 @@ function trayState(){
   return {mood:mood,title:title,lines:lines,book:busy||prog.phase==='building'?(prog.title||''):'',line:line,
     fail_line:prog.failPages?'⚠ '+prog.failPages+' 页有失败段落 — 打开阅读器查看':'',
     queue:queue.map(function(x){return baseOf(x.path)+(x.key?' · 来自 Zotero':'')}),paused:paused,busy:busy,has_last:!!lastOut,notify:notifyOn}}
-function tray(){
-  if(!T||trayTimer)return;
-  trayTimer=setTimeout(async function(){trayTimer=null;var st=trayState(),j=JSON.stringify(st);if(j===lastTrayJson)return;lastTrayJson=j;
-    try{st.image=await trayImageBytes(st.mood,st.lines)}catch(e){st.image=null}
-    T.core.invoke('tray_update',{state:st}).catch(function(){})},300)}
+// v54：有变化就推，不用计时器节流（一页翻完才变一次，本来就不密）；正在推的时候又变了，推完再补一次
+async function tray(){
+  renderStatus();
+  if(!T)return;if(trayBusy){trayAgain=true;return}trayBusy=true;
+  try{do{trayAgain=false;var st=trayState(),j=JSON.stringify(st);if(j===lastTrayJson)continue;lastTrayJson=j;
+      try{st.image=await trayImageBytes(st.mood,st.lines)}catch(e){st.image=null}
+      await T.core.invoke('tray_update',{state:st}).catch(function(){})}while(trayAgain)}
+  finally{trayBusy=false}}
+// 状态页（菜单栏“后台引擎状态”打开这个窗口时看得到）
+function esc(t){return String(t).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
+function renderStatus(){var el=document.getElementById('st');if(!el)return;
+  var head=job?('正在翻：'+esc(prog.title||baseOf(job.path))+'　'+prog.done+'/'+prog.pages+' 页'+(paused?'（已暂停）':'')+'　阶段：'+({translating:'翻译',building:'生成双栏 PDF',done:'完成',idle:'空闲'}[prog.phase]||prog.phase)):'空闲';
+  el.innerHTML='<h3>'+head+'</h3><p>排队：'+(queue.length?queue.map(function(x){return esc(baseOf(x.path))}).join('、'):'没有')+'　并发：'+getConc()+(lastOut?'　上一份：'+esc(lastOut):'')+'</p>'
+    +'<ol>'+LOG.slice(0,30).map(function(e){return '<li class="'+(e.ok?'ok':'bad')+'">'+e.t+'　第 '+esc(e.page)+' 页　'+esc(e.type)+'　'+esc(e.msg)+'</li>'}).join('')+'</ol>'}
 
 // ── 接任务：Zotero 链接、菜单栏 ──
 function onDeepLink(u){try{var url=new URL(u);if(url.protocol!=='pdfyi:')return;var q=url.searchParams;

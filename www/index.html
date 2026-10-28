@@ -1,6 +1,13 @@
 <!--
-  版本: v53
+  版本: v54
   更新日志:
+  v54 (本次：双栏 PDF 不再膨胀；后台引擎不依赖计时器；能看到后台在做什么):
+    - 修复：双栏 PDF 比原文件大很多（小宝实测 1.3MB 变成 11MB）。原因是逐页嵌入原页，多页共用的字体和图片每页各复制一份。
+      现在一次把整本书的页面复制进来，所有页共用同一份资源；没有旋转的页直接在原页上加宽、右半边写译文，
+      原 PDF 自带的链接和批注也保留下来。旋转过的页仍按原来的办法逐页嵌入。
+    - 后台引擎不再依赖计时器：macOS 会给看不见的窗口降速甚至冻结计时器，v53 因此卡在 0%。
+      后台不再错开请求（并发上限已经控制同时在路上的数量），菜单栏每翻完一页直接推一次，生成 PDF 时让出也不用计时器。
+    - 菜单栏新增“后台引擎状态”：打开后台引擎的窗口，看当前任务、进度和最近的日志。
   v53 (本次：拆出后台引擎，双架构):
     - Mac 程序里分成两部分：这个全量版只管读书；另有一个看不见的“后台引擎”窗口（worker.html），
       负责 Zotero 交来的书和菜单栏“后台翻译文件…”：不画页面，只做“提取 → 翻译 → 生成双栏 PDF → 存盘或挂回 Zotero”。
@@ -1313,7 +1320,7 @@ async function copyTransLog(){
   window.fetch=async function(u,o){
     if(!isLLM(u,o))return _f(u,o);
     var now=Date.now(),wait=Math.max(0,_nextSlot-now);_nextSlot=Math.max(now,_nextSlot)+200;
-    if(wait)await new Promise(function(res){setTimeout(res,wait)});
+    if(wait&&!window.PDFYI_WORKER)await new Promise(function(res){setTimeout(res,wait)});// 后台引擎里不等：看不见的窗口计时器可能被冻结
     var why='';
     for(var attempt=1;attempt<=2;attempt++){
       var own=null,tm=null,opts=o;
@@ -1333,7 +1340,7 @@ async function copyTransLog(){
         why=(e&&e.name==='AbortError')?'超时（180 秒）':'网络错误 '+((e&&e.message)||e);
       }finally{if(tm)clearTimeout(tm)}
       addTransLog('?','',why+'，1 秒后重试一次',activeModel,'重试',false);
-      await new Promise(function(res){setTimeout(res,1000)});
+      if(!window.PDFYI_WORKER)await new Promise(function(res){setTimeout(res,1000)});// 后台引擎里直接重试，不等计时器
     }
   };
 })();
@@ -3052,20 +3059,31 @@ async function exportBilingualPdf(auto){
     var out=await lib.PDFDocument.create();out.registerFontkit(fk);
     var font=await out.embedFont(fb,{subset:true});
     var sp=src.getPages(),N=sp.length;
+    // v54：一次复制整本，页面之间共用字体和图片（逐页嵌入会把共用资源每页复制一份，文件大好几倍）
+    var copied=await out.copyPages(src,sp.map(function(_,i){return i}));
     var INK=lib.rgb(0.16,0.11,0.22),MUTE=lib.rgb(0.55,0.5,0.62),LINE=lib.rgb(0.82,0.78,0.9);
     for(var p=1;p<=N;p++){
       // 小宝：按 pdf.js 的显示边界（裁剪盒）嵌入原页，按 /Rotate 转过来再放
       var pg=await pdfDoc.getPage(p),vp=pg.getViewport({scale:1}),box=pg.view,angle=((pg.rotate%360)+360)%360;
-      var ep=await out.embedPage(sp[p-1],{left:box[0],bottom:box[1],right:box[2],top:box[3]});
-      var W=vp.width,H=vp.height,yOff=box[1];
-      var page=out.addPage([W*2,H]);page.drawPage(ep,{x:angle===180||angle===270?W:0,y:angle===90||angle===180?H:0,rotate:lib.degrees(-angle)});
-      page.drawLine({start:{x:W,y:0},end:{x:W,y:H},thickness:0.6,color:LINE});
+      var W=vp.width,H=vp.height,yOff=box[1],ox=0,oy=0,page;
+      if(angle===0){
+        // 没旋转：直接用复制来的原页，把页面向右加宽一倍，右半边铺白底再写译文；原页的链接和批注都留着
+        page=out.addPage(copied[p-1]);ox=box[0];oy=box[1];
+        page.setMediaBox(ox,oy,W*2,H);page.setCropBox(ox,oy,W*2,H);
+        try{page.setTrimBox(ox,oy,W*2,H);page.setBleedBox(ox,oy,W*2,H);page.setArtBox(ox,oy,W*2,H)}catch(e){}
+        page.drawRectangle({x:ox+W,y:oy,width:W,height:H,color:lib.rgb(1,1,1)});
+      }else{
+        // 旋转过的页：小宝的办法，按裁剪盒嵌入再转正
+        var ep=await out.embedPage(sp[p-1],{left:box[0],bottom:box[1],right:box[2],top:box[3]});
+        page=out.addPage([W*2,H]);page.drawPage(ep,{x:angle===180||angle===270?W:0,y:angle===90||angle===180?H:0,rotate:lib.degrees(-angle)});
+      }
+      page.drawLine({start:{x:ox+W,y:oy},end:{x:ox+W,y:oy+H},thickness:0.6,color:LINE});
       var m=Math.max(18,W*0.06),x0=W+m,colW=W-2*m,top=H-m,bot=m;
-      page.drawText(String(p),{x:W*2-m,y:H-m*0.6,size:7,font:font,color:MUTE});
+      page.drawText(String(p),{x:ox+W*2-m,y:oy+H-m*0.6,size:7,font:font,color:MUTE});
       var zh=memCache[p],bbs=(pageBboxCache[p]&&pageBboxCache[p].bboxes)||[];
       var note=null;
       if(!zh||!zh.length){var zp=$('zh-page-'+p),un=zp&&zp.querySelector('.zh-unread,.zh-skip');note=un?un.textContent.replace(/^⚠\s*/,''):'这一页还没有翻译。'}
-      if(note){_wrap(note,font,9,colW).forEach(function(l,i){page.drawText(l,{x:x0,y:top-9-i*13,size:9,font:font,color:MUTE})})}
+      if(note){_wrap(note,font,9,colW).forEach(function(l,i){page.drawText(l,{x:ox+x0,y:oy+top-9-i*13,size:9,font:font,color:MUTE})})}
       else{
         var paras=zh.map(function(t){var fail=String(t||'').indexOf('__TRANSFAIL__')===0;return {t:fail?'〔本段翻译失败〕':String(t||''),fail:fail}});
         var useBB=bbs.length===paras.length;
@@ -3087,7 +3105,7 @@ async function exportBilingualPdf(auto){
           return {items:items,over:over,sz:sz}};
         for(fs=base;fs>=minFs;fs-=0.5){plan=layout(fs);if(!plan.over.length)break}
         if(plan.over.length)plan=layout(minFs);
-        plan.items.forEach(function(it){page.drawText(it.l,{x:x0,y:it.y,size:plan.sz,font:font,color:it.fail?MUTE:INK})});
+        plan.items.forEach(function(it){page.drawText(it.l,{x:ox+x0,y:oy+it.y,size:plan.sz,font:font,color:it.fail?MUTE:INK})});
         // 放不下的：加一页“续”
         var rest=plan.over;
         while(rest.length){var cp=out.addPage([W*2,H]);cp.drawLine({start:{x:W,y:0},end:{x:W,y:H},thickness:0.6,color:LINE});
@@ -3102,11 +3120,12 @@ async function exportBilingualPdf(auto){
         if(cssW&&cssH){var sX=W/cssW,sY=H/cssH,refs=[],ctx=out.context,PN=lib.PDFName,PS=lib.PDFString,PNum=lib.PDFNumber;
           hls.forEach(function(hl){var hex=hl.pdfColor||'FFE84D',r=parseInt(hex.slice(0,2),16)/255,g=parseInt(hex.slice(2,4),16)/255,b=parseInt(hex.slice(4,6),16)/255;
             var qp=[],mnX=Infinity,mnY=Infinity,mxX=-Infinity,mxY=-Infinity;
-            hl.rects.forEach(function(rc){var X0=rc.x*sX,Y0=H-(rc.y+rc.h)*sY,X1=X0+rc.w*sX,Y1=Y0+rc.h*sY;qp.push(X0,Y1,X1,Y1,X0,Y0,X1,Y0);mnX=Math.min(mnX,X0);mnY=Math.min(mnY,Y0);mxX=Math.max(mxX,X1);mxY=Math.max(mxY,Y1)});
+            hl.rects.forEach(function(rc){var X0=ox+rc.x*sX,Y0=oy+H-(rc.y+rc.h)*sY,X1=X0+rc.w*sX,Y1=Y0+rc.h*sY;qp.push(X0,Y1,X1,Y1,X0,Y0,X1,Y0);mnX=Math.min(mnX,X0);mnY=Math.min(mnY,Y0);mxX=Math.max(mxX,X1);mxY=Math.max(mxY,Y1)});
             if(!qp.length)return;
             refs.push(ctx.register(ctx.obj({Type:PN.of('Annot'),Subtype:PN.of('Highlight'),Rect:ctx.obj([mnX,mnY,mxX,mxY]),QuadPoints:ctx.obj(qp),
               Contents:lib.PDFHexString.fromText(hl.note||String(hl.text||'').slice(0,300)),T:lib.PDFHexString.fromText('PDF译'),C:ctx.obj([r,g,b]),CA:PNum.of(0.45),F:PNum.of(4)})))});
-          if(refs.length)page.node.set(PN.of('Annots'),ctx.obj(refs))}}
+          // 原页自带的批注（链接等）保留，新的接在后面
+          if(refs.length){var exA=page.node.Annots();if(exA)refs.forEach(function(r){exA.push(r)});else page.node.set(PN.of('Annots'),ctx.obj(refs))}}}
       if(p%5===0){setProgress(5+90*p/N);await new Promise(function(r){setTimeout(r,0)})}
     }
     var bytes=await out.save();

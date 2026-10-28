@@ -1,5 +1,5 @@
 import re, json, os, sys
-READER = '/mnt/user-data/outputs/pdf-reader-v52.html'
+READER = '/mnt/user-data/outputs/pdf-reader-v54.html'
 OUT = '/home/claude/build/www/core'
 os.makedirs(OUT, exist_ok=True)
 s = open(READER, encoding='utf-8').read(); js = s[s.index('<script>\n'):]
@@ -16,7 +16,7 @@ def fn(name):
 def line(prefix):
     m = re.search(r'(?m)^' + re.escape(prefix) + r'[^\n]*', js); assert m, prefix; return m.group(0)
 def take(*names): return '\n'.join(fn(n) for n in names)
-HEAD = '// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v52.html 原样移植生成，逻辑与全量版一致。\n'
+HEAD = '// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v54.html 原样移植生成，逻辑与全量版一致。\n'
 
 # ── textutil.js：纯文字处理，不碰页面 ──
 textutil = HEAD + '''// 文字工具：拼接、康熙部首、上标、分栏、句末判断、断行。全部是纯函数。
@@ -89,7 +89,7 @@ rp("  if(_bpBusy)return;_bpBusy=true;trayPush();\n", "  _bpBusy=true;\n")
 rp("    toast(auto?'翻完了，正在生成双栏 PDF…':'正在生成双栏 PDF…','ok');setProgress(5);\n", "")
 rp("var zp=$('zh-page-'+p),un=zp&&zp.querySelector('.zh-unread,.zh-skip');note=un?un.textContent.replace(/^⚠\\s*/,''):'这一页还没有翻译。'",
    "note=_pageNotes[p]||'这一页还没有翻译。'")
-rp("      if(p%5===0){setProgress(5+90*p/N);await new Promise(function(r){setTimeout(r,0)})}", "      if(p%5===0)await new Promise(function(r){setTimeout(r,0)});")
+rp("      if(p%5===0){setProgress(5+90*p/N);await new Promise(function(r){setTimeout(r,0)})}", "      if(p%5===0)await Promise.resolve();// 后台不用计时器让出")
 m = re.search(r"    var _bn=[^\n]*\n    var ok=[^\n]*\n    if\(ok&&!window.__TAURI__\)toast\([^\n]*\n", ex); assert m
 ex = ex[:m.start()] + "    return bytes;\n" + ex[m.end():]
 rp("  }catch(e){console.error(e);toast('双栏 PDF 没生成：'+(e.message||e),'err')}\n  finally{_bpBusy=false;setProgress(0);trayDone()}}", "  }finally{_bpBusy=false}}")

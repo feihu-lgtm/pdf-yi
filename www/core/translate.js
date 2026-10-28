@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v52.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v54.html 原样移植生成，逻辑与全量版一致。
 // 翻译：只走 Magpie。配置和全量版共用同一份浏览器存储（端点、模型）。
 var activeModel='magpie';
 function getMagpieUrl(){var e='';try{e=(localStorage.getItem('pdfyi_magpie_endpoint')||'').trim()}catch(x){}var u=(e||'http://127.0.0.1:3426/v1').replace(/\/+$/,'');
@@ -18,7 +18,7 @@ function getKey(){return 'sk-antigravity'}
   window.fetch=async function(u,o){
     if(!isLLM(u,o))return _f(u,o);
     var now=Date.now(),wait=Math.max(0,_nextSlot-now);_nextSlot=Math.max(now,_nextSlot)+200;
-    if(wait)await new Promise(function(res){setTimeout(res,wait)});
+    if(wait&&!window.PDFYI_WORKER)await new Promise(function(res){setTimeout(res,wait)});// 后台引擎里不等：看不见的窗口计时器可能被冻结
     var why='';
     for(var attempt=1;attempt<=2;attempt++){
       var own=null,tm=null,opts=o;
@@ -38,7 +38,7 @@ function getKey(){return 'sk-antigravity'}
         why=(e&&e.name==='AbortError')?'超时（180 秒）':'网络错误 '+((e&&e.message)||e);
       }finally{if(tm)clearTimeout(tm)}
       addTransLog('?','',why+'，1 秒后重试一次',activeModel,'重试',false);
-      await new Promise(function(res){setTimeout(res,1000)});
+      if(!window.PDFYI_WORKER)await new Promise(function(res){setTimeout(res,1000)});// 后台引擎里直接重试，不等计时器
     }
   };
 })();

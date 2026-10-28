@@ -1,12 +1,21 @@
 <!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><title>PDF译 后台引擎</title>
-<!-- 后台引擎：Mac 程序里一个看不见的窗口。不画页面，只做“提取 → 翻译 → 生成双栏 PDF → 存盘或挂回 Zotero”。 -->
+<!-- 后台引擎：Mac 程序里一个平时看不见的窗口。不画页面，只做“提取 → 翻译 → 生成双栏 PDF → 存盘或挂回 Zotero”。
+     菜单栏“后台引擎状态”会把它显示出来，看当前任务和日志。 -->
 <script>window.PDFYI_VENDOR='vendor/';window.PDFYI_WORKER=true;</script>
 <script src="vendor/pdf.min.js"></script>
+<script src="vendor/pdf-lib.min.js"></script>
+<script src="vendor/fontkit.umd.min.js"></script>
 <script src="core/textutil.js"></script>
 <script src="core/store.js"></script>
 <script src="core/extract.js"></script>
 <script src="core/translate.js"></script>
 <script src="core/bilingual.js"></script>
+<style>
+body{margin:0;padding:16px 20px;font:13px/1.6 -apple-system,"PingFang SC",sans-serif;background:#fffdf9;color:#3a2550}
+h3{margin:0 0 4px;font-size:15px} p{margin:0 0 10px;color:#6e5c86}
+ol{margin:0;padding-left:20px;font-size:12px} li.bad{color:#c0392b} li.ok{color:#3a2550}
+</style>
+</head><body><div id="st">后台引擎已启动，空闲。</div>
 <script src="worker.js"></script>
-</head><body></body></html>
+</body></html>

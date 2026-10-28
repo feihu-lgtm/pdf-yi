@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v52.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v54.html 原样移植生成，逻辑与全量版一致。
 // 提取：每页的原始行（pdf.js）、页眉页脚识别、脚注区、跨页补句。
 // 下面这些是“当前这本书”的状态，后台引擎每开一本书就重置一次（见 worker.js 的 resetBook）。
 var pdfDoc=null,rawPdfBytes=null,totalPages=0,cacheKey='';
