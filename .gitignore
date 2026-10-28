@@ -1,0 +1,3 @@
+mac-app/src-tauri/target/
+mac-app/src-tauri/gen/
+.DS_Store

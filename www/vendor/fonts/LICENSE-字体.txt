@@ -1,0 +1,3 @@
+NotoSansSC-Sub.ttf 由 Noto Sans CJK SC Regular（思源黑体）子集化并转换为 TrueType 格式而来。
+原字体 © Google / Adobe，以 SIL Open Font License 1.1 授权：https://openfontlicense.org
+改动：只保留拉丁、标点、上标、CJK 符号、统一汉字基本区、全角字符；外形由 CFF 转为 TrueType。

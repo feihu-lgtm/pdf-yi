@@ -1,0 +1,7 @@
+本目录下的第三方文件：
+- pdf.js 3.11.174（pdf.min.js、pdf.worker.min.js、cmaps/、pdf_viewer.css）— Apache License 2.0，Mozilla
+- pdf-lib 1.17.1 — MIT
+- @pdf-lib/fontkit 1.1.1 — MIT
+- mammoth 1.6.0 — BSD-2-Clause
+- JSZip 3.10.1 — MIT 或 GPLv3（任选）
+- fonts/NotoSansSC-Sub.ttf — SIL Open Font License 1.1（见 fonts/LICENSE-字体.txt）
