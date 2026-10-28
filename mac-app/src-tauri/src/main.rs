@@ -42,6 +42,9 @@ struct TrayState {
     busy: bool,
     has_last: bool,
     notify: bool,
+    // v51：页面画好的“小鱼 + 两行字”整张图（PNG）；有它就直接用，没有就按表情用单张图标
+    #[serde(default)]
+    image: Option<Vec<u8>>,
 }
 
 fn build_menu(app: &AppHandle, st: &TrayState) -> tauri::Result<Menu<Wry>> {
@@ -80,10 +83,16 @@ fn build_menu(app: &AppHandle, st: &TrayState) -> tauri::Result<Menu<Wry>> {
 #[tauri::command]
 fn tray_update(app: AppHandle, state: TrayState) -> Result<(), String> {
     let tray = app.tray_by_id("main").ok_or("菜单栏图标还没建好")?;
-    let img = Image::from_bytes(mood_icon(&state.mood)).map_err(|e| e.to_string())?;
+    let composed = state.image.as_ref().map_or(false, |b| !b.is_empty());
+    let img = match state.image.as_ref() {
+        Some(b) if !b.is_empty() => Image::from_bytes(b),
+        _ => Image::from_bytes(mood_icon(&state.mood)),
+    }
+    .map_err(|e| e.to_string())?;
     tray.set_icon(Some(img)).map_err(|e| e.to_string())?;
     let _ = tray.set_icon_as_template(true);
-    let title = if state.title.is_empty() { None } else { Some(state.title.clone()) };
+    // 两行字已经画进图里了，就不再另外显示一行文字
+    let title = if composed || state.title.is_empty() { None } else { Some(state.title.clone()) };
     tray.set_title(title).map_err(|e| e.to_string())?;
     let tip = if state.line.is_empty() { "PDF译".to_string() } else { format!("PDF译：{}", state.line) };
     let _ = tray.set_tooltip(Some(tip));
@@ -154,7 +163,7 @@ fn main() {
             let idle = TrayState {
                 mood: "sleeping".into(), title: String::new(), book: String::new(), line: String::new(),
                 fail_line: String::new(), queue: vec![], paused: false, busy: false,
-                has_last: false, notify: true,
+                has_last: false, notify: true, image: None,
             };
             let menu = build_menu(app.handle(), &idle)?;
             TrayIconBuilder::with_id("main")

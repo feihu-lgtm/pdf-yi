@@ -1,6 +1,12 @@
 <!--
-  版本: v50
+  版本: v51
   更新日志:
+  v51 (本次：菜单栏改成“图标 + 两行小字”):
+    - 小狐反馈菜单栏太小看不清。改成和常见菜单栏工具一样的样式：左边小鱼，右边上下两行小字。
+      · 翻译中：上“40%”（有排队时“40% +1”），下“约 6 分”（还估不出时显示“12/30”）；有失败时下一行是“⚠2 页”。
+      · 暂停：上“暂停”，下“40%”。生成双栏 PDF：上“生成”，下“PDF”。完成：上“完成”，下“✓”。空闲：只有小鱼。
+    - macOS 菜单栏自带的文字只能一行，所以由页面把“小鱼 + 两行字”画成一整张模板图交给菜单栏，菜单栏深浅自动着色。
+    - 小鱼图标去掉四周留白，撑满菜单栏高度，比 v47–v50 大一圈。
   v50 (本次：并发改回默认 6、范围 6–30):
     - 小狐的决定：v49 测出发热主要来自页面绘制，不是并发，所以并发改回默认 6，可选 6 / 8 / 10 / 12 / 16 / 20 / 24 / 30。
       v48、v49 存下的 2、3、4 自动变成 6。按字数分批、截断拆开重翻、请求错开 200 毫秒都保留。
@@ -3201,10 +3207,39 @@ function trayState(){
   return {mood:mood,title:title,book:pages?($('doc-title').textContent||''):'',line:line,fail_line:failLine,
     queue:_jobQueue.map(function(j){return j.path.slice(j.path.lastIndexOf('/')+1).replace(/\.pdf$/i,'')+' · 来自 Zotero'}),
     paused:_paused,busy:active,has_last:!!window._lastBiPdf,notify:notifyDone}}
+// v51：菜单栏 = 小鱼图标 + 右边两行小字，合成一张模板图（黑色加透明，macOS 按菜单栏深浅自动着色）
+var _trayIconP={};
+function _trayIcon(m){if(!_trayIconP[m])_trayIconP[m]=new Promise(function(res){var im=new Image();im.onload=function(){res(im)};im.onerror=function(){res(null)};im.src=(VENDOR||'vendor/')+'tray/'+m+'.png'});return _trayIconP[m]}
+var TRAY_FONT='-apple-system,"SF Pro Text","Helvetica Neue","PingFang SC",sans-serif';
+async function trayCanvas(mood,lines){
+  var im=await _trayIcon(mood),H=44,iconW=im?Math.round(im.width*H/im.height):0,gap=6;
+  var c=document.createElement('canvas'),x=c.getContext('2d');
+  var two=lines.length>=2,fs=two?19:26,font='600 '+fs+'px '+TRAY_FONT;x.font=font;
+  var tw=lines.length?Math.ceil(Math.max.apply(null,lines.map(function(l){return x.measureText(l).width}))):0;
+  c.width=Math.max(1,iconW+(tw?gap+tw:0));c.height=H;x=c.getContext('2d');
+  if(im)x.drawImage(im,0,0,iconW,H);
+  x.fillStyle='#000';x.font=font;x.textBaseline='alphabetic';
+  if(two){x.fillText(lines[0],iconW+gap,19);x.fillText(lines[1],iconW+gap,41)}
+  else if(lines.length===1)x.fillText(lines[0],iconW+gap,32);
+  return c}
+async function trayImageBytes(mood,lines){
+  var c=await trayCanvas(mood,lines);
+  var blob=await new Promise(function(r){c.toBlob(r,'image/png')});
+  return blob?Array.from(new Uint8Array(await blob.arrayBuffer())):null}
+function etaShort(){var t=etaText();return t.replace('不到 1 分钟','<1 分').replace(/^约 (\d+) 分钟$/,'约 $1 分')}
+function trayLines(st){
+  var t=_pageProgressTotals||{},pages=t.pages||0,fin=t.finished||0,pct=pages?Math.floor(fin/pages*100)+'%':'',q=_jobQueue.length?' +'+_jobQueue.length:'';
+  var fails=Object.keys(_pageProgress).filter(function(p){return _pageProgress[p].stage==='failed'}).length;
+  if(st.title==='生成中')return ['生成','PDF'];
+  if(st.title==='完成')return ['完成','✓'];
+  if(!st.busy)return q?['排队'+q.trim()]:[];
+  if(_paused)return ['暂停'+q,pct];
+  return [pct+q,fails?'⚠'+fails+' 页':(etaShort()||(fin+'/'+pages))]}
 function trayPush(){
   if(!window.__TAURI__)return;
   if(_trayTimer)return;// 每 0.3 秒最多推一次（不能用防抖：翻译时进度变化比 0.3 秒还密，会一直推不出去）
-  _trayTimer=setTimeout(function(){_trayTimer=null;var st=trayState(),j=JSON.stringify(st);if(j===_lastTrayJson)return;_lastTrayJson=j;
+  _trayTimer=setTimeout(async function(){_trayTimer=null;var st=trayState();st.lines=trayLines(st);var j=JSON.stringify(st);if(j===_lastTrayJson)return;_lastTrayJson=j;
+    try{st.image=await trayImageBytes(st.mood,st.lines)}catch(e){st.image=null}
     window.__TAURI__.core.invoke('tray_update',{state:st}).catch(function(){})},300)}
 function trayDone(){_trayDoneUntil=Date.now()+10000;trayPush();setTimeout(trayPush,10200)}
 function notifyFinished(title,body){
