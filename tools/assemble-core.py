@@ -1,5 +1,5 @@
 import re, json, os, sys
-READER = '/mnt/user-data/outputs/pdf-reader-v54.html'
+READER = '/mnt/user-data/outputs/pdf-reader-v55.html'
 OUT = '/home/claude/build/www/core'
 os.makedirs(OUT, exist_ok=True)
 s = open(READER, encoding='utf-8').read(); js = s[s.index('<script>\n'):]
@@ -16,7 +16,7 @@ def fn(name):
 def line(prefix):
     m = re.search(r'(?m)^' + re.escape(prefix) + r'[^\n]*', js); assert m, prefix; return m.group(0)
 def take(*names): return '\n'.join(fn(n) for n in names)
-HEAD = '// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v54.html 原样移植生成，逻辑与全量版一致。\n'
+HEAD = '// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v55.html 原样移植生成，逻辑与全量版一致。\n'
 
 # ── textutil.js：纯文字处理，不碰页面 ──
 textutil = HEAD + '''// 文字工具：拼接、康熙部首、上标、分栏、句末判断、断行。全部是纯函数。
@@ -96,7 +96,7 @@ rp("  }catch(e){console.error(e);toast('双栏 PDF 没生成：'+(e.message||e),
 bilingual = HEAD + '''// 双栏 PDF：左边原页（矢量，按裁剪盒和 /Rotate 转正），右边译文按原文高度对齐、放不下缩字号或加续页。
 var PDFLib=null,_fontkitP=null,_cjkFontP=null,_bpBusy=false,highlights=[],_pageNotes={};
 function pickFontFile(){return Promise.reject(new Error('找不到中文字体文件 vendor/fonts/NotoSansSC-Sub.ttf'))}
-''' + take('_loadScript', 'loadPdfLib', 'loadFontkit', 'loadCjkFont', 'bpFontSize') + '\n' + ex + '\n'
+''' + take('_loadScript', 'loadPdfLib', 'loadFontkit', 'loadCjkFont', 'bpFontSize', 'bpColumns', '_pageColumns') + '\n' + ex + '\n'
 open(OUT + '/bilingual.js', 'w', encoding='utf-8').write(bilingual)
 
 for f in sorted(os.listdir(OUT)):

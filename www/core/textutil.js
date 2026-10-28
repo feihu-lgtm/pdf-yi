@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v54.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v55.html 原样移植生成，逻辑与全量版一致。
 // 文字工具：拼接、康熙部首、上标、分栏、句末判断、断行。全部是纯函数。
 var VENDOR=window.PDFYI_VENDOR||'vendor/';
 var _TERM=/[.!?。！？…]["”’)\]）」』》]*(\d{0,3}|[⁰¹²³⁴⁵⁶⁷⁸⁹*†‡]{0,3})$/;
@@ -21,6 +21,7 @@ function pageTextQuality(lines){
   return null}
 function _colOrder(items,W){
   var its=items.filter(function(it){return it&&it.str&&it.str.trim()});
+  _colOrder.info=null;
   if(its.length<16||!W)return items;
   var x0=function(it){return it.transform[4]},x1=function(it){return it.transform[4]+(it.width||0)};
   var byLine={};its.forEach(function(it){var k=Math.round(it.transform[5]/3);(byLine[k]=byLine[k]||[]).push(it)});
@@ -33,6 +34,10 @@ function _colOrder(items,W){
   if(!best||best.both<5||best.free<5||best.free<best.both*0.6)return items;
   var sx=best.sx,ys=function(L){return L[0].transform[5]};
   lines.sort(function(a,b){return ys(b)-ys(a)});
+  // v55：记下分界线，以及页面中间（去掉上下各 8%）横跨两栏的行数，按栏对照时要用
+  var yTop=ys(lines[0]),yBot=ys(lines[lines.length-1]),span=Math.max(1,yTop-yBot),fullMid=0;
+  lines.forEach(function(L){var y=ys(L);if(y<yTop-span*0.08&&y>yBot+span*0.08&&L.some(function(it){return x0(it)<sx-4&&x1(it)>sx+4}))fullMid++});
+  _colOrder.info={sx:sx,fullMid:fullMid};
   var out=[],blockL=[],blockR=[];
   var flush=function(){blockL.forEach(function(L){out.push.apply(out,L)});blockR.forEach(function(L){out.push.apply(out,L)});blockL=[];blockR=[]};
   lines.forEach(function(L){
