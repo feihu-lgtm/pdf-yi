@@ -3129,35 +3129,23 @@ async function exportBilingualPdf(auto){
       for(var i=0;i<A.size();i++){var an=ctx.lookup(A.get(i));var R=an&&an.get&&ctx.lookup(an.get(PN.of('Rect')));
         if(!R||!R.asArray){keep.push(A.get(i));continue}var r=R.asArray().map(function(n){return n.asNumber?n.asNumber():0});var cx=(r[0]+r[2])/2;if(cx>=x0&&cx<=x1)keep.push(A.get(i))}
       page.node.set(PN.of('Annots'),ctx.obj(keep))};
-    // 把一组段落的译文排进 [tx,ty,tw,th] 这块区域；放不下就加“续”页（大小 contSize）
+    // 把一组段落排进原页译文区。v62：永不添加续页，整页统一缩小后再压行距。
     var drawTrans=function(page,tx,ty,tw,th,list,contSize,contTitle,contSplit,byHeight,mapX){
-      if(contSplit==null)contSplit=contSize[0]/2;
-      // v57：每段都有原文位置时，每段钉在“它原文的顶端到下一段原文的顶端”这块地方里，按段缩字号
-      if(list.length&&list.every(function(pa){return pa.anchor!=null})){boxFit(page,tx,ty,tw,th,list,contSize,contTitle,contSplit,mapX);return}
-      // v56.1：单栏按原文高度从上到下排（PDF 里先画的页脚不会把正文挤走）；没有高度的段落按原顺序放在后面
+      if(list.length&&list.every(function(pa){return pa.anchor!=null})){boxFit(page,tx,ty,tw,th,list,mapX);return}
       if(byHeight)list=list.map(function(pa,i){return {pa:pa,i:i}}).sort(function(a,b){var x=a.pa.anchor,y=b.pa.anchor;if(x==null&&y==null)return a.i-b.i;if(x==null)return 1;if(y==null)return -1;return (y-x)||(a.i-b.i)}).map(function(o){return o.pa});
-      var m=Math.max(14,tw*0.06),x0=tx+m,colW=tw-2*m,top=th-m,bot=m;
-      var base=bpFontSize()*Math.min(1.15,Math.max(0.85,tw/595)),minFs=Math.max(7.5,base-3.5),fs=base,plan=null;
-      // 排一遍：每段放在原文的高度，上一段挤下来就往下让
-      var layout=function(sz){var lh=sz*1.38,gap=sz*0.5,cursor=top,items=[],over=[];// v55：行距 1.38 倍
-        list.forEach(function(pa){var lines=_wrap(pa.t,font,sz,colW);var want=pa.anchor!=null?Math.min(top,pa.anchor):cursor;var y=Math.min(cursor,want);
-          lines.forEach(function(l){if(y-sz<bot){over.push({l:l,fail:pa.fail});return}items.push({l:l,y:y-sz,fail:pa.fail});y-=lh});
+      var m=Math.max(14,tw*0.06),x0=tx+m,colW=tw-2*m,top=th-m,bot=12,base=bpFontSize()*Math.min(1.15,Math.max(0.85,tw/595)),minFs=5,plan=null;
+      var layout=function(sz,LH,edge){var gap=sz*0.4,cursor=top,items=[],over=[];
+        list.forEach(function(pa){var lines=_wrap(pa.t,font,sz,colW),want=pa.anchor!=null?Math.min(top,pa.anchor):cursor,y=Math.min(cursor,want);
+          lines.forEach(function(l){if(y-sz<edge){over.push({l:l,fail:pa.fail});return}items.push({l:l,y:y-sz,fail:pa.fail});y-=sz*LH});
           cursor=y-gap});
-        return {items:items,over:over,sz:sz}};
-      for(fs=base;fs>=minFs;fs-=0.5){plan=layout(fs);if(!plan.over.length)break}
-      if(plan.over.length)plan=layout(minFs);
+        return {items:items,over:over,sz:sz,LH:LH}};
+      [1.3,1.25,1.2,1.15].some(function(LH){for(var sz=base;sz>=minFs;sz*=0.92){plan=layout(Math.max(minFs,sz),LH,bot);if(!plan.over.length)return true}return false});
+      if(!plan||plan.over.length)plan=layout(minFs,1.15,2);// 最后一档可用到底边距
       plan.items.forEach(function(it){page.drawText(it.l,{x:x0,y:ty+it.y,size:plan.sz,font:font,color:it.fail?MUTE:INK})});
-      var rest=plan.over;
-      while(rest.length){var cp=out.addPage(contSize);var half=contSplit;cp.drawLine({start:{x:half,y:0},end:{x:half,y:contSize[1]},thickness:0.6,color:LINE});
-        cp.drawText(contTitle,{x:m,y:contSize[1]-m,size:9,font:font,color:MUTE});
-        var y=top,next=[],lh=plan.sz*1.38;
-        rest.forEach(function(r){if(y-plan.sz<bot){next.push(r);return}cp.drawText(r.l,{x:half+m,y:y-plan.sz,size:plan.sz,font:font,color:r.fail?MUTE:INK});y-=lh});
-        if(next.length===rest.length)break;rest=next}};
-    // v57：学 zotero-pdf2zh 的对齐原理——每段译文只能用自己那一块地方，放不下就只缩这一段
-    // v58：每段的框照搬原文（同样的左右范围、从原文第一行的高度到下一段原文的高度），
-    // 字号从原文自己的字号起步，整页统一一个缩放比例；实在放不下的段落单独再缩
-    var boxFit=function(page,tx,ty,tw,th,list,contSize,contTitle,contSplit,mapX){
-      var pad=4,top=th-6,bot=12,LH=1.3,minFs=6,hardMax=Math.max(10,bpFontSize()*1.15),mg=Math.max(14,tw*0.06);
+      if(plan.over.length)addTransLog('?','','译文在 5pt、1.15 行距仍无法安全写入原页',activeModel,'排版',false)};
+    // v62：每段仍钉在自己的原文框；若有一段放不下，整页统一缩小，再压行距，绝不生成续页
+    var boxFit=function(page,tx,ty,tw,th,list,mapX){
+      var pad=4,top=th-6,bot=12,minFs=5,hardMax=Math.max(10,bpFontSize()*1.15),mg=Math.max(14,tw*0.06);
       var sf=list.map(function(pa){return pa.sfs}).filter(function(v){return v>0}).sort(function(x,y){return x-y});
       var medFs=sf.length?sf[Math.floor(sf.length/2)]:Math.min(10,bpFontSize());
       var B=list.map(function(pa,i){var x0,x1;
@@ -3166,30 +3154,19 @@ async function exportBilingualPdf(auto){
         return {pa:pa,i:i,x0:x0,x1:x1,top:Math.min(top,pa.anchor),target:Math.min(hardMax,Math.max(minFs,pa.sfs||medFs))}})
         .sort(function(a,b){return (b.top-a.top)||(a.i-b.i)});
       var ovl=function(a,b){return a.x0<b.x1-2&&b.x0<a.x1-2};
-      // 每段最多排到：下面最近一段（左右有重叠的）原文的位置
       B.forEach(function(o,k){o.limit=bot;for(var j=k+1;j<B.length;j++){if(ovl(o,B[j])&&B[j].top<o.top-1){o.limit=Math.max(bot,B[j].top+2);break}}});
-      var need=function(t,fs,w){return _wrap(t,font,fs,w).length*fs*LH-fs*(LH-1)};
-      var fitAt=function(o,space,cap){for(var fs=cap;fs>=minFs;fs-=0.25){if(need(o.pa.t,fs,o.x1-o.x0)<=space)return fs}return minFs};
-      // 整页统一的缩放比例：各段“放得下的最大字号 / 原文字号”的中位数（不放大）
-      var ratios=B.filter(function(o){return o.pa.sfs>0}).map(function(o){return fitAt(o,o.top-o.limit,o.target)/o.target}).sort(function(x,y){return x-y});
-      var R=ratios.length?Math.min(1,ratios[Math.floor(ratios.length/2)]):1;
-      var drawn=[],over=[];
-      B.forEach(function(o){
-        // 不叠字：起点不高于左右有重叠、已经排好的段的底部
-        var start=o.top;drawn.forEach(function(d){if(ovl(o,d))start=Math.min(start,d.bottom-3)});
-        var space=Math.max(0,start-o.limit),w=o.x1-o.x0;
-        var fs=Math.max(minFs,Math.min(o.target*R,fitAt(o,space,o.target)));
-        var lines=_wrap(o.pa.t,font,fs,w),y=start;
-        lines.forEach(function(l){if(y-fs<o.limit-0.5){over.push({l:l,fail:o.pa.fail});return}
-          page.drawText(l,{x:o.x0,y:ty+y-fs,size:fs,font:font,color:o.pa.fail?MUTE:INK});y-=fs*LH});
-        drawn.push({x0:o.x0,x1:o.x1,bottom:y+fs*LH-fs})});
-      // 真放不下的：续页（最小字号 +1，从上往下排）
-      var rest=over,cs=minFs+1,m=mg;
-      while(rest.length){var cp=out.addPage(contSize);cp.drawLine({start:{x:contSplit,y:0},end:{x:contSplit,y:contSize[1]},thickness:0.6,color:LINE});
-        cp.drawText(contTitle,{x:m,y:contSize[1]-m,size:9,font:font,color:MUTE});
-        var y2=contSize[1]-m,next=[],cw2=contSize[0]-contSplit-2*m;
-        rest.forEach(function(r){if(y2-cs<m){next.push(r);return}_wrap(r.l,font,cs,cw2).forEach(function(l2){cp.drawText(l2,{x:contSplit+m,y:y2-cs,size:cs,font:font,color:r.fail?MUTE:INK});y2-=cs*1.38})});
-        if(next.length===rest.length)break;rest=next}};
+      var layout=function(R,LH,edge){var drawn=[],items=[],over=[];
+        B.forEach(function(o){
+          var start=o.top;drawn.forEach(function(d){if(ovl(o,d))start=Math.min(start,d.bottom-3)});
+          var limit=o.limit===bot?edge:o.limit,fs=Math.max(minFs,Math.min(o.target,o.target*R)),lines=_wrap(o.pa.t,font,fs,o.x1-o.x0),y=start;
+          lines.forEach(function(l){if(y-fs<limit-0.5){over.push({l:l,fail:o.pa.fail});return}items.push({l:l,x:o.x0,y:y-fs,fs:fs,fail:o.pa.fail});y-=fs*LH});
+          drawn.push({x0:o.x0,x1:o.x1,bottom:y+fs*LH-fs})});
+        return {items:items,over:over}};
+      var plan=null;
+      [1.3,1.25,1.2,1.15].some(function(LH){for(var R=1;R>0.05;R*=0.92){plan=layout(R,LH,bot);if(!plan.over.length)return true}return false});
+      if(!plan||plan.over.length)plan=layout(0,1.15,2);// 最后一档只借用页面底边距，不跨下一段框
+      plan.items.forEach(function(it){page.drawText(it.l,{x:it.x,y:ty+it.y,size:it.fs,font:font,color:it.fail?MUTE:INK})});
+      if(plan.over.length)addTransLog('?','','译文在 5pt、1.15 行距仍无法安全写入原页',activeModel,'排版',false)};
     // 你的高亮写成 PDF 批注（只取中心落在 [x0,x1] 里的）
     var addHighlights=function(page,p,W,H,ox,oy,x0,x1){
       var hls=highlights.filter(function(h){return h.pageNum===p});if(!hls.length)return;
