@@ -94,10 +94,10 @@ rp("      if(p%5===0){setProgress(5+90*p/N);await new Promise(function(r){setTim
 m = re.search(r"    var _bn=[^\n]*\n    var ok=[^\n]*\n    if\(ok&&!window.__TAURI__\)toast\([^\n]*\n", ex); assert m
 ex = ex[:m.start()] + "    return bytes;\n" + ex[m.end():]
 rp("  }catch(e){console.error(e);toast('双栏 PDF 没生成：'+(e.message||e),'err')}\n  finally{_bpBusy=false;setProgress(0);trayDone()}}", "  }finally{_bpBusy=false}}")
-bilingual = HEAD + '''// 双栏 PDF：左边原页（矢量，按裁剪盒和 /Rotate 转正），右边译文按原文高度对齐、放不下缩字号或加续页。
+bilingual = HEAD + '''// 双栏 PDF：左边原页（矢量，按裁剪盒和 /Rotate 转正），右边译文按原文高度对齐、放不下缩字号，不生成续页。
 var PDFLib=null,_fontkitP=null,_cjkFontP=null,_bpBusy=false,highlights=[],_pageNotes={};
 function pickFontFile(){return Promise.reject(new Error('找不到中文字体文件 vendor/fonts/NotoSansSC-Sub.ttf'))}
-''' + take('_loadScript', 'loadPdfLib', 'loadFontkit', 'loadCjkFont', 'bpFontSize', 'bpColumns', '_pageColumns', '_paraSpans', '_paraGeometry') + '\n' + ex + '\n'
+''' + take('_loadScript', 'loadPdfLib', 'loadFontkit', 'loadCjkFont', 'bpFontSize', 'bpColumns', '_matchKeys', '_matchHead', '_pageColumns', '_paraSpans', '_paraGeometry') + '\n' + ex + '\n'
 open(OUT + '/bilingual.js', 'w', encoding='utf-8').write(bilingual)
 
 for f in sorted(os.listdir(OUT)):

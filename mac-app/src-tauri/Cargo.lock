@@ -2532,7 +2532,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-yi"
-version = "0.62.1"
+version = "0.62.2"
 dependencies = [
  "serde",
  "serde_json",

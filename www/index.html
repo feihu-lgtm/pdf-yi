@@ -3271,10 +3271,20 @@ function _paraGeometry(items,srcParas,bbs){
   var X0=function(it){return it.transform[4]},X1=function(it){return it.transform[4]+(it.width||0)};
   var FS=function(it){var t=it.transform;return Math.hypot(t[0],t[1])||Math.abs(t[3])||0};
   var useBB=bbs&&bbs.length===srcParas.length;
-  return srcParas.map(function(t,pi){var key=norm(t),bb=useBB?bbs[pi]:null,hit=null;
-    for(var pass=0;pass<2&&!hit;pass++){if(pass===0&&!bb)continue;if(key.length<4)break;
-      for(var i=0;i<its.length;i++){var it=its[i],y=it.transform[5];if(pass===0&&(y<bb.y-2||y>bb.y+bb.h+2))continue;
-        var s2=norm(it.str);if(s2.length<4)continue;var L=Math.min(12,s2.length,key.length);if(s2.slice(0,L)===key.slice(0,L)){hit=it;break}}}
+  return srcParas.map(function(t,pi){var ks=_matchKeys(norm,t),bb=useBB?bbs[pi]:null,hit=null;
+    for(var pass=0;pass<2&&!hit;pass++){if(pass===0&&!bb)continue;
+      for(var q=0;q<ks.length&&!hit;q++){var key=ks[q];if(key.length<4)continue;
+        for(var i=0;i<its.length;i++){var it=its[i],y=it.transform[5];if(pass===0&&(y<bb.y-2||y>bb.y+bb.h+2))continue;
+          var s2=norm(it.str);if(s2.length<4)continue;var L=Math.min(12,s2.length,key.length);if(s2.slice(0,L)===key.slice(0,L)){hit=it;break}}}}
+    if(!hit&&bb){var yAim=bb.y0!=null?bb.y0:bb.y+bb.h-14,head=_matchHead(t),best=null;
+      // PDF.js 经常把段首拆成单词片段；先按首词和 bbox 顶部找，不让另一栏的长片段抢走
+      if(head)its.forEach(function(it){var y=it.transform[5],s2=norm(it.str),d=Math.abs(y-yAim);if(y<bb.y-2||y>bb.y+bb.h+2||s2.slice(0,head.length)!==head)return;
+        if(!best||d<best.d||(d===best.d&&String(it.str).length>String(best.it.str).length))best={it:it,d:d}});
+      if(best)hit=best.it}
+    if(!hit&&bb){var yAim=bb.y0!=null?bb.y0:bb.y+bb.h-14,best=null;
+      its.forEach(function(it){var y=it.transform[5],d=Math.abs(y-yAim);if(y<bb.y-2||y>bb.y+bb.h+2)return;
+        if(!best||d<best.d||(d===best.d&&String(it.str).length>String(best.it.str).length))best={it:it,d:d}});
+      if(best)hit=best.it}
     if(!hit)return {ext:null,sfs:null};
     // 开头那一行里，和开头片段连着的部分（相邻片段的空隙不到 10pt；两栏之间的空隙更宽，不会连过去）
     var y0=hit.transform[5],row=its.filter(function(it){return Math.abs(it.transform[5]-y0)<=1.5}).sort(function(p,q){return X0(p)-X0(q)});
@@ -3287,6 +3297,10 @@ function _paraGeometry(items,srcParas,bbs){
     return {ext:[a,b],sfs:FS(hit)}})}
 // v55：按栏对照的开关（默认开）
 function bpColumns(){try{return localStorage.getItem('pdfyi_bp_cols')!=='0'}catch(e){return true}}
+function _matchKeys(norm,t){var key=norm(t),bare=key.replace(/^[^a-z]+/,'');return bare&&bare!==key?[key,bare]:[key]}
+function _matchHead(t){var m=String(t).toLowerCase().match(/[a-z]{3,}/);return m?m[0]:''}
+
+
 // v55：这一页能不能按栏拆：两栏、中间没有通栏内容、两栏都有段落；返回分界线和每段在哪一栏
 async function _pageColumns(pg,W,srcParas,n,bbs){
   if(!n||srcParas.length!==n)return null;
@@ -3296,12 +3310,17 @@ async function _pageColumns(pg,W,srcParas,n,bbs){
   var norm=function(t){return String(t).replace(/[\s\u00ad⁰¹²³⁴⁵⁶⁷⁸⁹]+/g,'').toLowerCase()};
   var cols=[],last=0,cnt=[0,0];
   var useBB=bbs&&bbs.length===n;
-  srcParas.forEach(function(t,pi){var key=norm(t),c=-1,bb=useBB?bbs[pi]:null;
-    // 先只在这一段原文所在的高度范围里找它的开头（两栏有同样开头的句子时不会认错），找不到再全页找
+  srcParas.forEach(function(t,pi){var ks=_matchKeys(norm,t),c=-1,bb=useBB?bbs[pi]:null;
+    // 先只在这一段原文所在的高度范围里找它的开头；编号标题再试去掉编号
     for(var pass=0;pass<2&&c<0;pass++){if(pass===0&&!bb)continue;
-      if(key.length>=6){for(var i=0;i<items.length;i++){var it=items[i],y=it.transform[5];if(pass===0&&(y<bb.y-2||y>bb.y+bb.h+2))continue;
-        var s2=norm(it.str);if(s2.length<6)continue;var L=Math.min(12,s2.length,key.length);
-        if(s2.slice(0,L)===key.slice(0,L)){var x=it.transform[4]+(it.width||0)/2;c=x<info.sx?0:1;break}}}}
+      for(var q=0;q<ks.length&&c<0;q++){var key=ks[q];if(key.length<6)continue;
+        for(var i=0;i<items.length;i++){var it=items[i],y=it.transform[5];if(pass===0&&(y<bb.y-2||y>bb.y+bb.h+2))continue;
+          var s2=norm(it.str);if(s2.length<6)continue;var L=Math.min(12,s2.length,key.length);
+          if(s2.slice(0,L)===key.slice(0,L)){var x=it.transform[4]+(it.width||0)/2;c=x<info.sx?0:1;break}}}}
+    if(c<0&&bb){var yAim=bb.y0!=null?bb.y0:bb.y+bb.h-14,head=_matchHead(t),best=null;
+      if(head)items.forEach(function(it){var y=it.transform[5],s2=norm(it.str),d=Math.abs(y-yAim);if(y<bb.y-2||y>bb.y+bb.h+2||s2.slice(0,head.length)!==head)return;
+        if(!best||d<best.d||(d===best.d&&String(it.str).length>String(best.it.str).length))best={it:it,d:d}});
+      if(best){var x=best.it.transform[4]+(best.it.width||0)/2;c=x<info.sx?0:1}}
     if(c<0)c=last;cols.push(c);last=c;cnt[c]++});
   if(!cnt[0]||!cnt[1])return null;
   var ysA=items.map(function(it){return it.transform[5]}),yT=Math.max.apply(null,ysA),yB=Math.min.apply(null,ysA),sp2=Math.max(1,yT-yB),lx0=Infinity,rx1=-Infinity;
