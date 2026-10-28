@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v57.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v58.html 原样移植生成，逻辑与全量版一致。
 // 双栏 PDF：左边原页（矢量，按裁剪盒和 /Rotate 转正），右边译文按原文高度对齐、放不下缩字号或加续页。
 var PDFLib=null,_fontkitP=null,_cjkFontP=null,_bpBusy=false,highlights=[],_pageNotes={};
 function pickFontFile(){return Promise.reject(new Error('找不到中文字体文件 vendor/fonts/NotoSansSC-Sub.ttf'))}
@@ -58,6 +58,26 @@ function _paraSpans(items,info,srcParas,bbs){
     return (hit.transform[4]+(hit.width||0)/2)<sx?'L':'R'});
   var lFrac=(isFinite(lx0)&&isFinite(rx1)&&rx1>lx0)?Math.min(0.75,Math.max(0.25,(sx-lx0)/(rx1-lx0))):0.5;
   return {spans:spans,lFrac:lFrac}}
+function _paraGeometry(items,srcParas,bbs){
+  var its=items.filter(function(it){return it.str&&it.str.trim()});if(!its.length||!srcParas.length)return null;
+  var norm=function(t){return String(t).replace(/[\s\u00ad⁰¹²³⁴⁵⁶⁷⁸⁹]+/g,'').toLowerCase()};
+  var X0=function(it){return it.transform[4]},X1=function(it){return it.transform[4]+(it.width||0)};
+  var FS=function(it){var t=it.transform;return Math.hypot(t[0],t[1])||Math.abs(t[3])||0};
+  var useBB=bbs&&bbs.length===srcParas.length;
+  return srcParas.map(function(t,pi){var key=norm(t),bb=useBB?bbs[pi]:null,hit=null;
+    for(var pass=0;pass<2&&!hit;pass++){if(pass===0&&!bb)continue;if(key.length<4)break;
+      for(var i=0;i<its.length;i++){var it=its[i],y=it.transform[5];if(pass===0&&(y<bb.y-2||y>bb.y+bb.h+2))continue;
+        var s2=norm(it.str);if(s2.length<4)continue;var L=Math.min(12,s2.length,key.length);if(s2.slice(0,L)===key.slice(0,L)){hit=it;break}}}
+    if(!hit)return {ext:null,sfs:null};
+    // 开头那一行里，和开头片段连着的部分（相邻片段的空隙不到 10pt；两栏之间的空隙更宽，不会连过去）
+    var y0=hit.transform[5],row=its.filter(function(it){return Math.abs(it.transform[5]-y0)<=1.5}).sort(function(p,q){return X0(p)-X0(q)});
+    var k=row.indexOf(hit),a=X0(hit),b=X1(hit);
+    for(var r=k+1;r<row.length&&X0(row[r])<=b+10;r++)b=Math.max(b,X1(row[r]));
+    for(var l=k-1;l>=0&&X1(row[l])>=a-10;l--)a=Math.min(a,X0(row[l]));
+    // 再并上这一段其他行里，和它左右连着的片段（标题这类单行段就保持原宽）
+    if(bb){var yLo=bb.y-1,yHi=(bb.y0!=null?bb.y0:bb.y+bb.h-14)+1;
+      for(var rep=0;rep<2;rep++)its.forEach(function(it){var y=it.transform[5];if(y<yLo||y>yHi)return;var p0=X0(it),p1=X1(it);if(p1>=a-10&&p0<=b+10){a=Math.min(a,p0);b=Math.max(b,p1)}})}
+    return {ext:[a,b],sfs:FS(hit)}})}
 // 生成双栏 PDF，返回文件内容（Uint8Array）。没翻的页、读不出字的页，右边写 _pageNotes 里的原因
 async function buildBilingualPdf(){
   if(!pdfDoc||!rawPdfBytes)throw new Error('没有打开 PDF');
@@ -77,24 +97,24 @@ async function buildBilingualPdf(){
       if(!zh||!zh.length){note=_pageNotes[p]||'这一页还没有翻译。'}
       var pl={p:p,pg:pg,vp:vp,box:box,angle:angle,zh:zh,bbs:bbs,note:note,col:null,twoCol:false};
       if(!note){try{var tcP=await pg.getTextContent();_colOrder(tcP.items,vp.width);var infoP=_colOrder.info;pl.twoCol=!!infoP;
-        if(infoP&&angle===0)pl.mirror=_paraSpans(tcP.items,infoP,pageTextCache[p]||[],bbs)}catch(e){}}
+        if(angle===0)pl.geo=_paraGeometry(tcP.items,pageTextCache[p]||[],bbs)}catch(e){}}
       if(!note&&angle===0&&bpColumns())pl.col=await _pageColumns(pg,vp.width,pageTextCache[p]||[],zh.length,bbs);
-      if(pl.col)pl.mirror=null;
       plans.push(pl);if(angle===0){idx.push(p-1);if(pl.col)idx.push(p-1)}}
     // 一次复制整本，页面之间共用字体和图片（按栏拆的页复制两份，资源仍共用）
     var copied=await out.copyPages(src,idx),ci=0;
     // 复制来的页如果和另一份共用内容列表或批注列表，先各自拆开，免得往一份里加东西另一份也跟着变
-    var isolate=function(page){['Contents','Annots'].forEach(function(k){var v=page.node.get(PN.of(k));if(v instanceof lib.PDFRef){var o=ctx.lookup(v);if(o instanceof lib.PDFArray)page.node.set(PN.of(k),o.clone(ctx))}})};
+    // 小宝定位：内容列表可能是引用指向的数组，也可能直接就是数组；两种都要拆开（原始内容流仍共用）
+    var isolate=function(page){['Contents','Annots'].forEach(function(k){var v=page.node.get(PN.of(k));var o=v instanceof lib.PDFRef?ctx.lookup(v):v;if(o instanceof lib.PDFArray)page.node.set(PN.of(k),o.clone(ctx))})};
     // 只保留落在 [x0,x1] 里的原页批注
     var keepAnnots=function(page,x0,x1){var A=page.node.Annots();if(!A)return;var keep=[];
       for(var i=0;i<A.size();i++){var an=ctx.lookup(A.get(i));var R=an&&an.get&&ctx.lookup(an.get(PN.of('Rect')));
         if(!R||!R.asArray){keep.push(A.get(i));continue}var r=R.asArray().map(function(n){return n.asNumber?n.asNumber():0});var cx=(r[0]+r[2])/2;if(cx>=x0&&cx<=x1)keep.push(A.get(i))}
       page.node.set(PN.of('Annots'),ctx.obj(keep))};
     // 把一组段落的译文排进 [tx,ty,tw,th] 这块区域；放不下就加“续”页（大小 contSize）
-    var drawTrans=function(page,tx,ty,tw,th,list,contSize,contTitle,contSplit,byHeight,lFrac){
+    var drawTrans=function(page,tx,ty,tw,th,list,contSize,contTitle,contSplit,byHeight,mapX){
       if(contSplit==null)contSplit=contSize[0]/2;
       // v57：每段都有原文位置时，每段钉在“它原文的顶端到下一段原文的顶端”这块地方里，按段缩字号
-      if(list.length&&list.every(function(pa){return pa.anchor!=null})){boxFit(page,tx,ty,tw,th,list,contSize,contTitle,contSplit,lFrac);return}
+      if(list.length&&list.every(function(pa){return pa.anchor!=null})){boxFit(page,tx,ty,tw,th,list,contSize,contTitle,contSplit,mapX);return}
       // v56.1：单栏按原文高度从上到下排（PDF 里先画的页脚不会把正文挤走）；没有高度的段落按原顺序放在后面
       if(byHeight)list=list.map(function(pa,i){return {pa:pa,i:i}}).sort(function(a,b){var x=a.pa.anchor,y=b.pa.anchor;if(x==null&&y==null)return a.i-b.i;if(x==null)return 1;if(y==null)return -1;return (y-x)||(a.i-b.i)}).map(function(o){return o.pa});
       var m=Math.max(14,tw*0.06),x0=tx+m,colW=tw-2*m,top=th-m,bot=m;
@@ -115,28 +135,37 @@ async function buildBilingualPdf(){
         rest.forEach(function(r){if(y-plan.sz<bot){next.push(r);return}cp.drawText(r.l,{x:half+m,y:y-plan.sz,size:plan.sz,font:font,color:r.fail?MUTE:INK});y-=lh});
         if(next.length===rest.length)break;rest=next}};
     // v57：学 zotero-pdf2zh 的对齐原理——每段译文只能用自己那一块地方，放不下就只缩这一段
-    var boxFit=function(page,tx,ty,tw,th,list,contSize,contTitle,contSplit,lFrac){
-      var m=Math.max(14,tw*0.06),x0=tx+m,inner=tw-2*m,top=th-m,bot=m,LH=1.3,minFs=6.5;
-      var base=bpFontSize()*Math.min(1.15,Math.max(0.85,tw/595));
-      // 双栏镜像：右半边也分左右两栏；横跨两栏的段（F）用整个宽度
-      var g=10,lw=lFrac?(inner-g)*lFrac:inner,geo={F:[x0,inner],L:[x0,lw],R:[x0+lw+g,inner-g-lw]};
-      var L=list.map(function(pa,i){var sp=lFrac?(pa.span||'F'):'F';return {pa:pa,i:i,span:sp,top:Math.min(top,pa.anchor)}})
+    // v58：每段的框照搬原文（同样的左右范围、从原文第一行的高度到下一段原文的高度），
+    // 字号从原文自己的字号起步，整页统一一个缩放比例；实在放不下的段落单独再缩
+    var boxFit=function(page,tx,ty,tw,th,list,contSize,contTitle,contSplit,mapX){
+      var pad=4,top=th-6,bot=12,LH=1.3,minFs=6,hardMax=Math.max(10,bpFontSize()*1.15),mg=Math.max(14,tw*0.06);
+      var sf=list.map(function(pa){return pa.sfs}).filter(function(v){return v>0}).sort(function(x,y){return x-y});
+      var medFs=sf.length?sf[Math.floor(sf.length/2)]:Math.min(10,bpFontSize());
+      var B=list.map(function(pa,i){var x0,x1;
+        if(pa.ext&&mapX){x0=mapX(pa.ext[0]);x1=mapX(pa.ext[1])}else{x0=tx+mg;x1=tx+tw-mg}
+        x0=Math.max(tx+pad,x0);x1=Math.min(tx+tw-pad,x1);if(x1-x0<40)x0=Math.max(tx+pad,x1-40);
+        return {pa:pa,i:i,x0:x0,x1:x1,top:Math.min(top,pa.anchor),target:Math.min(hardMax,Math.max(minFs,pa.sfs||medFs))}})
         .sort(function(a,b){return (b.top-a.top)||(a.i-b.i)});
-      var clash=function(a,b){return a==='F'||b==='F'||a===b};
-      var over=[],btm={L:Infinity,R:Infinity};// 左右两栏各自已经排到的最低处（横跨两栏的段两边都算）
-      L.forEach(function(o,k){
-        var floor=o.span==='F'?Math.min(btm.L,btm.R):btm[o.span];if(isFinite(floor))o.top=Math.min(o.top,floor-3);
-        // 这一段最多排到：下面最近一段（同一栏或横跨两栏）原文的顶端
-        var limit=bot;for(var j=k+1;j<L.length;j++){if(clash(o.span,L[j].span)&&L[j].top<o.top-1){limit=Math.max(bot,L[j].top+2);break}}
-        var space=Math.max(0,o.top-limit),w=geo[o.span][1],x=geo[o.span][0],fs,lines;// o.top 已按上面那道保险调整过
-        for(fs=base;fs>=minFs;fs-=0.5){lines=_wrap(o.pa.t,font,fs,w);if(lines.length*fs*LH-fs*(LH-1)<=space)break}
-        if(fs<minFs){fs=minFs;lines=_wrap(o.pa.t,font,fs,w)}
-        var y=o.top;
-        lines.forEach(function(l){if(y-fs<limit-0.5){over.push({l:l,fail:o.pa.fail});return}
-          page.drawText(l,{x:x,y:ty+y-fs,size:fs,font:font,color:o.pa.fail?MUTE:INK});y-=fs*LH});
-        var end=y+fs*LH-fs;if(o.span==='F'){btm.L=Math.min(btm.L,end);btm.R=Math.min(btm.R,end)}else btm[o.span]=Math.min(btm[o.span],end)});
-      // 真放不下的：续页（用最小字号，从上往下排）
-      var rest=over,cs=minFs+1;
+      var ovl=function(a,b){return a.x0<b.x1-2&&b.x0<a.x1-2};
+      // 每段最多排到：下面最近一段（左右有重叠的）原文的位置
+      B.forEach(function(o,k){o.limit=bot;for(var j=k+1;j<B.length;j++){if(ovl(o,B[j])&&B[j].top<o.top-1){o.limit=Math.max(bot,B[j].top+2);break}}});
+      var need=function(t,fs,w){return _wrap(t,font,fs,w).length*fs*LH-fs*(LH-1)};
+      var fitAt=function(o,space,cap){for(var fs=cap;fs>=minFs;fs-=0.25){if(need(o.pa.t,fs,o.x1-o.x0)<=space)return fs}return minFs};
+      // 整页统一的缩放比例：各段“放得下的最大字号 / 原文字号”的中位数（不放大）
+      var ratios=B.filter(function(o){return o.pa.sfs>0}).map(function(o){return fitAt(o,o.top-o.limit,o.target)/o.target}).sort(function(x,y){return x-y});
+      var R=ratios.length?Math.min(1,ratios[Math.floor(ratios.length/2)]):1;
+      var drawn=[],over=[];
+      B.forEach(function(o){
+        // 不叠字：起点不高于左右有重叠、已经排好的段的底部
+        var start=o.top;drawn.forEach(function(d){if(ovl(o,d))start=Math.min(start,d.bottom-3)});
+        var space=Math.max(0,start-o.limit),w=o.x1-o.x0;
+        var fs=Math.max(minFs,Math.min(o.target*R,fitAt(o,space,o.target)));
+        var lines=_wrap(o.pa.t,font,fs,w),y=start;
+        lines.forEach(function(l){if(y-fs<o.limit-0.5){over.push({l:l,fail:o.pa.fail});return}
+          page.drawText(l,{x:o.x0,y:ty+y-fs,size:fs,font:font,color:o.pa.fail?MUTE:INK});y-=fs*LH});
+        drawn.push({x0:o.x0,x1:o.x1,bottom:y+fs*LH-fs})});
+      // 真放不下的：续页（最小字号 +1，从上往下排）
+      var rest=over,cs=minFs+1,m=mg;
       while(rest.length){var cp=out.addPage(contSize);cp.drawLine({start:{x:contSplit,y:0},end:{x:contSplit,y:contSize[1]},thickness:0.6,color:LINE});
         cp.drawText(contTitle,{x:m,y:contSize[1]-m,size:9,font:font,color:MUTE});
         var y2=contSize[1]-m,next=[],cw2=contSize[0]-contSplit-2*m;
@@ -171,7 +200,7 @@ async function buildBilingualPdf(){
               var a=Math.atan2(t[1],t[0]),dx=Math.cos(a)*it.width,dy=Math.sin(a)*it.width,hx=-Math.sin(a)*it.height,hy=Math.cos(a)*it.height;
               [[t[4],t[5]],[t[4]+dx,t[5]+dy],[t[4]+hx,t[5]+hy],[t[4]+dx+hx,t[5]+dy+hy]].forEach(function(pt){topY=Math.min(topY,vp.convertToViewportPoint(pt[0],pt[1])[1])})});
             return isFinite(topY)?H-topY:null})}
-        paras=pl.zh.map(function(t,i){var fail=String(t||'').indexOf('__TRANSFAIL__')===0;return {t:fail?'〔本段翻译失败〕':String(t||''),fail:fail,anchor:useBB?anchors[i]:null,i:i,span:(pl.mirror&&pl.mirror.spans[i])||'F'}})}
+        paras=pl.zh.map(function(t,i){var fail=String(t||'').indexOf('__TRANSFAIL__')===0;return {t:fail?'〔本段翻译失败〕':String(t||''),fail:fail,anchor:useBB?anchors[i]:null,i:i,ext:(pl.geo&&pl.geo[i]&&pl.geo[i].ext)||null,sfs:(pl.geo&&pl.geo[i]&&pl.geo[i].sfs)||null}})}
       if(pl.col){
         // ── 按栏：左栏一张、右栏一张，每张“这一栏原文 + 这一栏译文” ──
         for(var c=0;c<2;c++){
@@ -184,7 +213,7 @@ async function buildBilingualPdf(){
           page.drawRectangle({x:cx0+cw,y:oy,width:tw,height:H,color:WHITE});
           page.drawLine({start:{x:cx0+cw,y:oy},end:{x:cx0+cw,y:oy+H},thickness:0.6,color:LINE});
           page.drawText(p+(c?' 右栏':' 左栏'),{x:cx0+sw-46,y:oy+H-12,size:7,font:font,color:MUTE});
-          drawTrans(page,cx0+cw,oy,tw,H,paras.filter(function(pa){return pl.col.cols[pa.i]===c}),[sw,H],'第 '+p+' 页'+(c?'右栏':'左栏')+'（续）',cw,true);
+          drawTrans(page,cx0+cw,oy,tw,H,paras.filter(function(pa){return pl.col.cols[pa.i]===c}),[sw,H],'第 '+p+' 页'+(c?'右栏':'左栏')+'（续）',cw,true,(function(cx0,cw){return function(a){return cx0+cw+(a-cx0)*1.35}})(cx0,cw));
           addHighlights(page,p,W,H,box[0],oy,cx0,cx1)}
       }else{
         var ox=0,oy=0,page;
@@ -202,7 +231,7 @@ async function buildBilingualPdf(){
         page.drawLine({start:{x:ox+W,y:oy},end:{x:ox+W,y:oy+H},thickness:0.6,color:LINE});
         page.drawText(String(p),{x:ox+W*2-Math.max(18,W*0.06),y:oy+H-Math.max(18,W*0.06)*0.6,size:7,font:font,color:MUTE});
         if(pl.note){var m0=Math.max(18,W*0.06);_wrap(pl.note,font,9,W-2*m0).forEach(function(l,i){page.drawText(l,{x:ox+W+m0,y:oy+H-m0-9-i*13,size:9,font:font,color:MUTE})})}
-        else drawTrans(page,ox+W,oy,W,H,paras,[W*2,H],'第 '+p+' 页（续）',null,!pl.twoCol,pl.mirror?pl.mirror.lFrac:null);
+        else drawTrans(page,ox+W,oy,W,H,paras,[W*2,H],'第 '+p+' 页（续）',null,!pl.twoCol,angle===0?(function(ox,W,bx){return function(a){return ox+W+(a-bx)}})(ox,W,box[0]):null);
         addHighlights(page,p,W,H,ox,oy,null,null)}
       if(p%5===0)await Promise.resolve();// 后台不用计时器让出
     }
