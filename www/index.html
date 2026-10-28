@@ -1,6 +1,11 @@
 <!--
-  版本: v51
+  版本: v52
   更新日志:
+  v52 (本次：菜单栏的状态符号单独放大):
+    - 小狐反馈小人的表情太小看不出来。把画里的 Zz（睡觉）、气泡（思考）、灯泡（灵感）从图上抠出来，
+      和暂停的两条竖杠一起，当作和文字差不多高的符号排在两行字前面；小人的脸只用来认出这是 PDF译。
+      空闲“脸 + Zz”；翻译中“脸 + 气泡 + 40% / 约 6 分”；暂停“脸 + 两条竖杠 + 暂停 / 40%”；
+      生成和完成“脸 + 灯泡 + 生成 / PDF”“完成 / ✓”。符号原样用小狐画的笔触。
   v51 (本次：菜单栏改成“图标 + 两行小字”):
     - 小狐反馈菜单栏太小看不清。改成和常见菜单栏工具一样的样式：左边小鱼，右边上下两行小字。
       · 翻译中：上“40%”（有排队时“40% +1”），下“约 6 分”（还估不出时显示“12/30”）；有失败时下一行是“⚠2 页”。
@@ -3207,23 +3212,28 @@ function trayState(){
   return {mood:mood,title:title,book:pages?($('doc-title').textContent||''):'',line:line,fail_line:failLine,
     queue:_jobQueue.map(function(j){return j.path.slice(j.path.lastIndexOf('/')+1).replace(/\.pdf$/i,'')+' · 来自 Zotero'}),
     paused:_paused,busy:active,has_last:!!window._lastBiPdf,notify:notifyDone}}
-// v51：菜单栏 = 小鱼图标 + 右边两行小字，合成一张模板图（黑色加透明，macOS 按菜单栏深浅自动着色）
-var _trayIconP={};
-function _trayIcon(m){if(!_trayIconP[m])_trayIconP[m]=new Promise(function(res){var im=new Image();im.onload=function(){res(im)};im.onerror=function(){res(null)};im.src=(VENDOR||'vendor/')+'tray/'+m+'.png'});return _trayIconP[m]}
+// v52：菜单栏 = 小鱼的脸 + 状态符号（Zz、气泡、灯泡、暂停）+ 右边两行小字，合成一张模板图
+// （黑色加透明，macOS 按菜单栏深浅自动着色）。符号是从小狐画的图上抠出来的，放大到接近文字的高度
+var _trayImgP={};
+function _trayImg(name){if(!_trayImgP[name])_trayImgP[name]=new Promise(function(res){var im=new Image();im.onload=function(){res(im)};im.onerror=function(){res(null)};im.src=(VENDOR||'vendor/')+'tray/'+name+'.png'});return _trayImgP[name]}
 var TRAY_FONT='-apple-system,"SF Pro Text","Helvetica Neue","PingFang SC",sans-serif';
-async function trayCanvas(mood,lines){
-  var im=await _trayIcon(mood),H=44,iconW=im?Math.round(im.width*H/im.height):0,gap=6;
+var TRAY_SYM={sleeping:'zz',thinking:'bubble',normal:'pause',inspired:'bulb'};
+async function trayCanvas(face,sym,lines){
+  var H=44,gap=5,fim=await _trayImg('face-'+face),sim=sym?await _trayImg('sym-'+sym):null;
+  var fw=fim?Math.round(fim.width*H/fim.height):0,SH=34,sw=sim?Math.round(sim.width*SH/sim.height):0;
   var c=document.createElement('canvas'),x=c.getContext('2d');
   var two=lines.length>=2,fs=two?19:26,font='600 '+fs+'px '+TRAY_FONT;x.font=font;
   var tw=lines.length?Math.ceil(Math.max.apply(null,lines.map(function(l){return x.measureText(l).width}))):0;
-  c.width=Math.max(1,iconW+(tw?gap+tw:0));c.height=H;x=c.getContext('2d');
-  if(im)x.drawImage(im,0,0,iconW,H);
-  x.fillStyle='#000';x.font=font;x.textBaseline='alphabetic';
-  if(two){x.fillText(lines[0],iconW+gap,19);x.fillText(lines[1],iconW+gap,41)}
-  else if(lines.length===1)x.fillText(lines[0],iconW+gap,32);
+  c.width=Math.max(1,fw+(sw?gap+sw:0)+(tw?gap+2+tw:0));c.height=H;x=c.getContext('2d');
+  var cur=0;
+  if(fim){x.drawImage(fim,0,0,fw,H);cur=fw}
+  if(sim){x.drawImage(sim,cur+gap,Math.round((H-SH)/2),sw,SH);cur+=gap+sw}
+  x.fillStyle='#000';x.font=font;x.textBaseline='alphabetic';var tx=cur+gap+2;
+  if(two){x.fillText(lines[0],tx,19);x.fillText(lines[1],tx,41)}
+  else if(lines.length===1)x.fillText(lines[0],tx,32);
   return c}
 async function trayImageBytes(mood,lines){
-  var c=await trayCanvas(mood,lines);
+  var c=await trayCanvas(mood,TRAY_SYM[mood]||null,lines);
   var blob=await new Promise(function(r){c.toBlob(r,'image/png')});
   return blob?Array.from(new Uint8Array(await blob.arrayBuffer())):null}
 function etaShort(){var t=etaText();return t.replace('不到 1 分钟','<1 分').replace(/^约 (\d+) 分钟$/,'约 $1 分')}
