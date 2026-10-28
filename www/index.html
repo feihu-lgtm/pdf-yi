@@ -1,6 +1,13 @@
 <!--
-  版本: v47
+  版本: v48
   更新日志:
+  v48 (本次：一次多带上下文、少开并发，减轻 Mac 发热):
+    - 翻译按字数分批，不再固定每 6 段一次：每次最多带约 3000 个英文字符（最多 24 段），一般一整页一次翻完，
+      很长的页才拆成两三次。请求次数少了，一页的段落放在一起翻，前后文也更连贯。
+    - 一次带得多以后，最怕输出被截断。现在只要有段落没翻好（输出被截断、没对上编号、返回空内容），
+      就把没翻好的那几段对半拆开分两次重翻，最多拆三层；网络错误和 5xx 不在这里重复重试（请求出口已经重试过一次）。
+    - 并发调低：设置里“同时发几个请求”改成 2 / 3 / 4 / 6 / 8 / 12，默认 3。之前存过更大数值的降到 12。
+    - 发给模型的请求错开：每发出一个，下一个至少隔 200 毫秒，不会一瞬间全部打出去。
   v47 (本次：菜单栏换成小狐画的四张小鱼):
     - 菜单栏图标改用四张手绘的小鱼（水母头女孩）：平时、来灵感、在思考、睡着了。按状态换表情，不再用“染头发”表示进度，进度看旁边的数字：
       · 空闲 → 睡着了；翻译中 → 在思考（旁边“31/60”“⚠2”“+1”）；暂停 → 平时（“暂停 31/60”）；
@@ -954,10 +961,10 @@ mark.align-hl{background:color-mix(in srgb,var(--tS) 22%,transparent);color:inhe
   <div class="s-row"><label for="auto-bipdf">翻完自动生成双栏 PDF</label><input type="checkbox" id="auto-bipdf" style="accent-color:var(--tJ)"></div>
   <div class="s-row" id="conc-row"><label for="conc-select">同时发几个请求</label>
     <select id="conc-select" style="flex:2;min-width:0;padding:4px;font-size:11px">
-      <option value="6" selected>6（默认）</option><option value="8">8</option><option value="10">10</option><option value="12">12</option><option value="16">16</option><option value="20">20</option><option value="24">24</option><option value="30">30（最快，风险也最大）</option>
+      <option value="2">2（最省电）</option><option value="3" selected>3（默认）</option><option value="4">4</option><option value="6">6</option><option value="8">8</option><option value="12">12（最快，也最热）</option>
     </select>
   </div>
-  <div class="s-row" style="font-size:10px;color:var(--mute);line-height:1.5;margin-top:-4px">OCR 清理、段落合并、翻译都按这个数来。越大越快，但同一时间打到账号上的请求也越多。</div>
+  <div class="s-row" style="font-size:10px;color:var(--mute);line-height:1.5;margin-top:-4px">OCR 清理、段落合并、翻译都按这个数来。越大越快，但电脑越热、同一时间打到账号上的请求也越多。</div>
   <div class="s-row"><button id="clear-keys-btn" style="width:100%;padding:6px;background:transparent;border:1px solid var(--border2);color:var(--red,#e05252);cursor:pointer;font-family:var(--font-mono);font-size:11px">清除已保存 Key</button></div>
   <div style="border-top:1px solid var(--border2);margin-top:8px;padding-top:8px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
@@ -1238,8 +1245,8 @@ function getFinishReason(d){return d&&d.choices&&d.choices[0]?(d.choices[0].fini
 function allPageNums(){if(window._realPageOrder)return window._realPageOrder.slice();var a=[];for(var i=1;i<=totalPages;i++)a.push(i);return a}
 function maxPageNum(){var a=allPageNums();return a.length?Math.max.apply(null,a):0}
 // v35：并发数由设置里的“同时发几个请求”决定，默认 6，所有环节共用；不再写死 25 / 50
-function getConc(){var v=6;try{v=parseInt(localStorage.getItem('pdfyi_conc'))||6}catch(e){}return Math.max(6,Math.min(30,v))}
-(function(){var sel=$('conc-select');if(!sel)return;sel.value=String(getConc());if(!sel.value)sel.value='6';
+function getConc(){var v=3;try{v=parseInt(localStorage.getItem('pdfyi_conc'))||3}catch(e){}return Math.max(2,Math.min(12,v))}
+(function(){var sel=$('conc-select');if(!sel)return;sel.value=String(getConc());if(!sel.value){sel.value='3';try{localStorage.setItem('pdfyi_conc','3')}catch(e){}}
   sel.addEventListener('change',function(){try{localStorage.setItem('pdfyi_conc',sel.value)}catch(e){}CONC=getConc();toast('同时发 '+sel.value+' 个请求，下一批开始生效','ok')})})();
 var savedEnCache={};// v33：与译文缓存配套保存的原文分段 {texts,bboxes}
 function escHtml(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
@@ -1268,8 +1275,11 @@ async function copyTransLog(){
   function mk(t,r){if(typeof Response==='function')return new Response(t,{status:r.status,statusText:r.statusText,headers:r.headers});
     return {ok:r.status>=200&&r.status<300,status:r.status,statusText:r.statusText||'',headers:r.headers,text:function(){return Promise.resolve(t)},json:function(){return Promise.resolve().then(function(){return JSON.parse(t)})}}}
   function errMsg(t){try{var j=JSON.parse(t);if(j&&j.error)return j.error.message||JSON.stringify(j.error)}catch(e){}return String(t||'').slice(0,200)}
+  var _nextSlot=0;// v48：发给模型的请求之间至少隔 200 毫秒
   window.fetch=async function(u,o){
     if(!isLLM(u,o))return _f(u,o);
+    var now=Date.now(),wait=Math.max(0,_nextSlot-now);_nextSlot=Math.max(now,_nextSlot)+200;
+    if(wait)await new Promise(function(res){setTimeout(res,wait)});
     var why='';
     for(var attempt=1;attempt<=2;attempt++){
       var own=null,tm=null,opts=o;
@@ -3561,15 +3571,32 @@ async function doTranslate(p,paras,docKey){
   // pageTextCache已在提取阶段AI合并，此处直接使用
   var zhP=$('zh-page-'+p);if(zhP){zhP.innerHTML='';var l=document.createElement('div');l.className='zh-page-label';l.textContent='第 '+p+' 页 · 翻译中…';zhP.appendChild(l);
     paras.forEach(function(){var s=document.createElement('div');s.className='skeleton';var ln=document.createElement('div');ln.className='skel-line';ln.style.width=(55+Math.random()*40)+'%';s.appendChild(ln);zhP.appendChild(s)})}
-  var BATCH=6,results=new Array(paras.length),need=[],done=0,failed=0;
+  var BUDGET=3000,MAXN=24,results=new Array(paras.length),need=[],done=0,failed=0;
   // v40：以中文为主的段落原样保留，只翻其余的
   paras.forEach(function(t,i){if(_isZhPara(t)){results[i]=t;done++}else need.push(i)});
   setPageProgress(p,'translating',done,paras.length,failed,ck0);
   try{
-    for(var i=0;i<need.length;i+=BATCH){
-      var ids=need.slice(i,i+BATCH);var t=await apiBatch(apiKey,ids.map(function(k){return paras[k]}),p);
-      if(cacheKey!==ck0)return;
-      ids.forEach(function(k,j){results[k]=(t&&t[j])!==undefined?t[j]:'__TRANSFAIL__结果缺失（批次未返回）';done++;if(typeof results[k]==='string'&&results[k].indexOf('__TRANSFAIL__')===0)failed++});
+    // v48：按字数分批（约 3000 个英文字符、最多 24 段），一般一整页一次
+    var batches=[],cur=[],len=0;
+    need.forEach(function(k){var L=String(paras[k]).length;if(cur.length&&(len+L>BUDGET||cur.length>=MAXN)){batches.push(cur);cur=[];len=0}cur.push(k);len+=L});
+    if(cur.length)batches.push(cur);
+    // 翻一批；输出被截断、没对上、空返回的那几段，对半拆开重翻，最多拆三层
+    var SPLITTABLE=/输出被截断|未匹配到译文|模型返回空内容|结果缺失/;
+    var runIds=async function(ids,depth){
+      var t=await apiBatch(apiKey,ids.map(function(k){return paras[k]}),p);
+      if(cacheKey!==ck0)return false;
+      var redo=[];
+      ids.forEach(function(k,j){var r=(t&&t[j])!==undefined?t[j]:'__TRANSFAIL__结果缺失（批次未返回）';
+        if(typeof r==='string'&&r.indexOf('__TRANSFAIL__')===0&&SPLITTABLE.test(r)&&ids.length>1&&depth<3)redo.push(k);else results[k]=r});
+      if(redo.length){addTransLog(p,'',ids.length+' 段里有 '+redo.length+' 段没翻好，拆开重翻（第 '+(depth+1)+' 层）',activeModel,'翻译',false);
+        var h=Math.ceil(redo.length/2);
+        if(await runIds(redo.slice(0,h),depth+1)===false)return false;
+        if(redo.length>h&&await runIds(redo.slice(h),depth+1)===false)return false}
+      return true};
+    for(var bi=0;bi<batches.length;bi++){
+      var ids=batches[bi];
+      if(await runIds(ids,0)===false)return;
+      ids.forEach(function(k){done++;if(typeof results[k]==='string'&&results[k].indexOf('__TRANSFAIL__')===0)failed++});
       setPageProgress(p,'translating',done,paras.length,failed,ck0);
     }
   }catch(e){if(cacheKey===ck0)setPageProgress(p,'failed',done,paras.length,failed,ck0);throw e}
