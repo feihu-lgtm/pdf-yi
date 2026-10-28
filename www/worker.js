@@ -94,8 +94,10 @@ async function run(j){
   var mDoi=p1T.match(/\b10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+/);
   var itemDoi=mDoi?mDoi[0].replace(/[.,;)]+$/,''):'';
   addRecent({title:baseOf(j.path),path:out.path,source:j.path,doi:itemDoi,p1Text:p1T,zotero:out.zotero,pages:totalPages,fails:prog.failParas,at:Date.now()});
-  log('完成：'+baseOf(j.path)+(out.zotero?'，已挂回 Zotero':'，已存到原文件旁边'));
-  prog.phase='done';prog.doneUntil=Date.now()+10000;refresh();setTimeout(refresh,10200);
+  var destDesc=out.zotero?'已挂回 Zotero 条目':'已存到原文件所在文件夹';
+  addTransLog('-','','【已做好】《'+baseOf(j.path)+'_双栏.pdf》（共 '+totalPages+' 页），'+destDesc+'。','magpie','任务',true);
+  log('做好了：'+baseOf(j.path)+'（共 '+totalPages+' 页，'+destDesc+'）');
+  prog.phase='done';prog.doneUntil=Date.now()+30000;refresh();setTimeout(refresh,30200);
   notify(out.zotero?'双栏 PDF 已经挂回 Zotero':'双栏 PDF 已存到原文件旁边',baseOf(j.path)+'_双栏，'+totalPages+' 页，'+prog.failParas+' 段失败')}
 var resumeWaiters=[];function waitResume(fn){if(resumeWaiters.indexOf(fn)<0)resumeWaiters.push(fn)}
 function resume(){var w=resumeWaiters;resumeWaiters=[];w.forEach(function(f){f()})}
@@ -203,7 +205,7 @@ function renderNow(){
   if(!$('job'))return;
   var mood=moodNow(),busy=prog.phase==='translating',eta=etaText();
   $('face').style.setProperty('--img','url('+VENDOR+'tray/face-'+mood+'.png)');
-  $('say').textContent=prog.phase==='building'?'在把译文排进双栏 PDF。':busy?(paused?'先停下了，点“继续”接着翻。':'在翻《'+prog.title+'》'+(eta?'，'+eta+'翻完。':'。')):(Date.now()<prog.doneUntil?'翻好了：'+prog.title+'。':(queue.length?'马上开始下一本。':'在睡觉，没有要翻的书。'));
+  $('say').textContent=prog.phase==='building'?'在把译文排进双栏 PDF。':busy?(paused?'先停下了，点“继续”接着翻。':'在翻《'+prog.title+'》'+(eta?'，'+eta+'翻完。':'。')):(Date.now()<prog.doneUntil?'《'+prog.title+'》做好了。':(queue.length?'马上开始下一本。':'在睡觉，没有要翻的书。'));
   var bp=$('btn-pause');bp.disabled=!busy;bp.textContent=paused?'继续':'暂停';
   var h='';
   if(busy||prog.phase==='building'){
@@ -217,12 +219,16 @@ function renderNow(){
       +(prog.phase==='building'?'<span class="chip">正在生成双栏 PDF</span>':(eta&&!paused?'<span class="chip">'+eta+'</span>':''))
       +(prog.failPages?'<span class="chip bad">'+prog.failPages+' 页有失败段落</span>':'')+'</div></div>';
   }else{
+    var doneNow=Date.now()<prog.doneUntil;
+    var targetP=lastOut||(recent[0]&&recent[0].path);
+    var btnActions=targetP?'<div class="actions" style="margin-top:10px;justify-content:center;"><button class="pxbtn main" data-act="open-last">打开双栏 PDF</button><button class="pxbtn" data-act="reveal-last">打开文件夹</button></div>':'';
     h='<div class="idle"><div class="face" style="--img:url('+VENDOR+'tray/face-'+mood+'.png)"></div><p>'
-      +(Date.now()<prog.doneUntil?'《'+esc(prog.title)+'》翻好了。':'把 PDF 交给我，翻完放回原处。')+'</p></div>'}
+      +(doneNow?'《'+esc(prog.title)+'》做好了。':'把 PDF 交给我，翻完放回原处。')+'</p>'
+      +btnActions+'</div>'}
   $('job').innerHTML=h;
   $('queue').innerHTML=queue.length?queue.map(function(x){return '<li><div class="li-main"><div class="li-t">'+esc(baseOf(x.path))+'</div><div class="li-s">'+(x.key?'来自 Zotero':'本地文件')+'</div></div></li>'}).join(''):'<li class="empty">没有排队的书。</li>';
   $('recent').innerHTML=recent.length?recent.map(function(r,i){return '<li><div class="li-main"><div class="li-t">'+esc(r.title)+'</div><div class="li-s">'+ago(r.at)+'，'+r.pages+' 页'+(r.fails?'，'+r.fails+' 段失败':'')+(r.zotero?'，已在 Zotero':'')+'</div></div>'
-    +(r.path?'<button class="lnk" data-open="'+i+'">打开</button><button class="lnk" data-reveal="'+i+'">在访达中显示</button>':'')
+    +(r.path?'<button class="lnk" data-open="'+i+'">打开</button><button class="lnk" data-reveal="'+i+'">打开文件夹</button>':'')
     +(r.zotero?'<span class="li-s">已在 Zotero</span>':(r.path&&r.source?'<button class="lnk" data-zotero="'+i+'"'+(r.importing?' disabled':'')+'>'+(r.importing?'加入中…':'加入 Zotero')+'</button>':''))+'</li>'}).join(''):'<li class="empty">还没有翻好的书。</li>'}
 
 // ══ 面板：日志 ══
@@ -262,6 +268,8 @@ function bindUI(){
   $('btn-pause').onclick=togglePause;
   $('btn-add').onclick=function(){if(T)T.core.invoke('bg_pick').catch(function(e){log('打不开选文件的窗口：'+e,false)})};
   $('btn-reader').onclick=function(){if(T)T.core.invoke('show_main').catch(function(){})};
+  $('job').onclick=function(e){var act=e.target.dataset.act,tp=lastOut||(recent[0]&&recent[0].path);if(!act||!tp||!T)return;
+    T.core.invoke(act==='open-last'?'open_path':'reveal_path',{path:tp}).catch(function(err){log('打不开：'+err,false)})};
   $('recent').onclick=function(e){var o=e.target.dataset.open,r=e.target.dataset.reveal,z=e.target.dataset.zotero,i=o!=null?o:r;if(z!=null){importRecent(+z);return}if(i==null||!T)return;var it=recent[+i];if(!it||!it.path)return;
     T.core.invoke(o!=null?'open_path':'reveal_path',{path:it.path}).catch(function(err){log('打不开：'+err,false)})};
 async function importRecent(i){
