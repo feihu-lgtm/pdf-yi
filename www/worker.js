@@ -10,7 +10,8 @@ var CMAP=VENDOR+'cmaps/';
 var $=function(id){return document.getElementById(id)};
 
 // ══ 日志 ══
-var LOG=[],logFilter='all',logSeenBad=0,logSeq=0,logOpen={};// logOpen：展开着的那几条（重画时保持展开）
+var LOG=[],logFilter='all',logSeenBad=0,logSeq=0,logOpen={};
+var queuePage=1,queuePageSize=3,recentPage=1,recentPageSize=4,logPage=1,logPageSize=15;
 function hhmmss(){var d=new Date(),z=function(n){return (n<10?'0':'')+n};return z(d.getHours())+':'+z(d.getMinutes())+':'+z(d.getSeconds())}
 // 翻译和合并成功时，日志里只写一句摘要；模型返回的原文留着，点开那一条再看
 function summarize(type,out,ok){var s=String(out||'');if(!ok)return s;
@@ -43,7 +44,7 @@ var pageState=[];// 每页：w 排队、t 正在翻、d 翻好、f 有失败、u
 var recent=[];try{recent=JSON.parse(lsGet('pdfyi_recent','[]'))||[]}catch(e){recent=[]}
 function enqueue(j){if(!j||!j.path){log('收到的任务没有文件路径',false);return}
   if(queue.some(function(x){return x.path===j.path})||(job&&job.path===j.path)){log('已经在队列里：'+baseOf(j.path));return}
-  log('加入队列：'+baseOf(j.path)+(j.key?'（来自 Zotero）':''));queue.push(j);refresh();next()}
+  log('加入队列：'+baseOf(j.path)+(j.key?'（来自 Zotero）':''));queue.push(j);queuePage=1;refresh();next()}
 function next(){if(job||!queue.length)return;job=queue.shift();
   run(job).catch(function(e){addTransLog('-','',baseOf(job.path)+' 没翻成：'+(e&&e.message||e),'magpie','任务',false);notify('这一本没翻成',baseOf(job.path)+'：'+(e&&e.message||e))})
     .finally(function(){job=null;if(prog.phase!=='done')prog.phase='idle';refresh();Promise.resolve().then(next)})}// 不用计时器：看不见的窗口里计时器可能被冻结
@@ -139,7 +140,7 @@ async function saveOut(j,bytes){
   if(!r.ok)throw new Error('双栏 PDF 存好了（'+out+'），但没挂上 Zotero：'+(r.error||res));
   return {path:j.mode==='stored'?null:out,zotero:true}}
 function notify(title,body){try{if(notifyOn&&T&&T.notification)T.notification.sendNotification({title:title,body:body})}catch(e){}}
-function addRecent(r){recent=[r].concat(recent.filter(function(x){return x.path!==r.path||!r.path})).slice(0,8);lsSet('pdfyi_recent',JSON.stringify(recent))}
+function addRecent(r){recent=[r].concat(recent.filter(function(x){return x.path!==r.path||!r.path})).slice(0,30);recentPage=1;lsSet('pdfyi_recent',JSON.stringify(recent))}
 
 // ══ 菜单栏：小鱼的脸 + 状态符号 + 两行小字（按设置画） ══
 var _imgP={};
@@ -226,10 +227,18 @@ function renderNow(){
       +(doneNow?'《'+esc(prog.title)+'》做好了。':'把 PDF 交给我，翻完放回原处。')+'</p>'
       +btnActions+'</div>'}
   $('job').innerHTML=h;
-  $('queue').innerHTML=queue.length?queue.map(function(x){return '<li><div class="li-main"><div class="li-t">'+esc(baseOf(x.path))+'</div><div class="li-s">'+(x.key?'来自 Zotero':'本地文件')+'</div></div></li>'}).join(''):'<li class="empty">没有排队的书。</li>';
-  $('recent').innerHTML=recent.length?recent.map(function(r,i){return '<li><div class="li-main"><div class="li-t">'+esc(r.title)+'</div><div class="li-s">'+ago(r.at)+'，'+r.pages+' 页'+(r.fails?'，'+r.fails+' 段失败':'')+(r.zotero?'，已在 Zotero':'')+'</div></div>'
+  var qTotal=Math.max(1,Math.ceil(queue.length/queuePageSize));
+  if(queuePage>qTotal)queuePage=qTotal;
+  var qStart=(queuePage-1)*queuePageSize,qItems=queue.slice(qStart,qStart+queuePageSize);
+  $('queue').innerHTML=queue.length?qItems.map(function(x){return '<li><div class="li-main"><div class="li-t">'+esc(baseOf(x.path))+'</div><div class="li-s">'+(x.key?'来自 Zotero':'本地文件')+'</div></div></li>'}).join(''):'<li class="empty">没有排队的书。</li>';
+  if($('queue-pager')){$('queue-pager').innerHTML=queue.length>queuePageSize?('<button class="pager-btn" data-act="q-prev"'+(queuePage<=1?' disabled':'')+'>◀</button><span class="pager-txt">'+queuePage+' / '+qTotal+'</span><button class="pager-btn" data-act="q-next"'+(queuePage>=qTotal?' disabled':'')+'>▶</button>'):''}
+  var rTotal=Math.max(1,Math.ceil(recent.length/recentPageSize));
+  if(recentPage>rTotal)recentPage=rTotal;
+  var rStart=(recentPage-1)*recentPageSize,rItems=recent.slice(rStart,rStart+recentPageSize);
+  $('recent').innerHTML=recent.length?rItems.map(function(r,idx){var i=rStart+idx;return '<li><div class="li-main"><div class="li-t">'+esc(r.title)+'</div><div class="li-s">'+ago(r.at)+'，'+r.pages+' 页'+(r.fails?'，'+r.fails+' 段失败':'')+(r.zotero?'，已在 Zotero':'')+'</div></div>'
     +(r.path?'<button class="lnk" data-open="'+i+'">打开</button><button class="lnk" data-reveal="'+i+'">打开文件夹</button>':'')
-    +(r.zotero?'<span class="li-s">已在 Zotero</span>':(r.path&&r.source?'<button class="lnk" data-zotero="'+i+'"'+(r.importing?' disabled':'')+'>'+(r.importing?'加入中…':'加入 Zotero')+'</button>':''))+'</li>'}).join(''):'<li class="empty">还没有翻好的书。</li>'}
+    +(r.zotero?'<span class="li-s">已在 Zotero</span>':(r.path&&r.source?'<button class="lnk" data-zotero="'+i+'"'+(r.importing?' disabled':'')+'>'+(r.importing?'加入中…':'加入 Zotero')+'</button>':''))+'</li>'}).join(''):'<li class="empty">还没有翻好的书。</li>';
+  if($('recent-pager')){$('recent-pager').innerHTML=recent.length>recentPageSize?('<button class="pager-btn" data-act="rec-prev"'+(recentPage<=1?' disabled':'')+'>◀</button><span class="pager-txt">'+recentPage+' / '+rTotal+'</span><button class="pager-btn" data-act="rec-next"'+(recentPage>=rTotal?' disabled':'')+'>▶</button>'):''}}
 
 // ══ 面板：日志 ══
 var TYPE_DOT={'引擎':'var(--lav)','翻译':'var(--tL)','合并':'var(--tS)','术语表':'var(--tP)','提取':'var(--faint)','任务':'var(--warn)','提示':'var(--warn)','清理规则':'var(--tJ)','结构扫描':'var(--tJ)'};
@@ -239,10 +248,14 @@ function renderLog(){
   var unseen=bad-logSeenBad;if(!$('tab-log').hidden)logSeenBad=bad,unseen=0;
   b.hidden=unseen<=0;b.textContent=unseen;
   var rows=LOG.filter(function(e){return logFilter==='all'||(logFilter==='bad'&&!e.ok)||(logFilter==='engine'&&e.type==='引擎')});
-  $('log').innerHTML=rows.length?rows.slice(0,120).map(function(e){
+  var totalLogPages=Math.max(1,Math.ceil(rows.length/logPageSize));
+  if(logPage>totalLogPages)logPage=totalLogPages;
+  var pagedRows=rows.slice((logPage-1)*logPageSize,logPage*logPageSize);
+  $('log').innerHTML=rows.length?pagedRows.map(function(e){
     var pg=(e.page!=null&&e.page!=='-'&&e.page!=='?')?'<span>第 '+esc(e.page)+' 页</span>':'';
     return '<li data-id="'+e.id+'" class="'+(e.ok?'':'bad')+(e.full?' more':'')+(logOpen[e.id]?' open':'')+'" style="--dot:'+(TYPE_DOT[e.type]||'var(--lav)')+'"><div class="lg-h"><time>'+e.t+'</time><span class="tag">'+esc(e.type)+'</span>'+pg+'</div><div class="lg-m">'+esc(e.msg)+'</div>'+(e.full?'<div class="lg-full">'+esc(e.full)+'</div>':'')+'</li>'}).join('')
-    :'<li class="empty" style="list-style:none">'+(logFilter==='bad'?'没有出错的记录。':'还没有记录。')+'</li>'}
+    :'<li class="empty" style="list-style:none">'+(logFilter==='bad'?'没有出错的记录。':'还没有记录。')+'</li>';
+  if($('log-pager')){$('log-pager').innerHTML=rows.length>logPageSize?('<button class="pager-btn" data-act="log-prev"'+(logPage<=1?' disabled':'')+'>◀ 上一页</button><span class="pager-txt">第 '+logPage+' / '+totalLogPages+' 页（共 '+rows.length+' 条）</span><button class="pager-btn" data-act="log-next"'+(logPage>=totalLogPages?' disabled':'')+'>下一页 ▶</button>'):''}}
 function logText(){return LOG.slice().reverse().map(function(e){return e.t+' ['+e.type+(e.ok?'':'·出错')+']'+((e.page!=null&&e.page!=='-'&&e.page!=='?')?' 第'+e.page+'页':'')+' '+e.msg}).join('\n')}
 
 // ══ 面板：菜单栏设置 ══
@@ -272,6 +285,14 @@ function bindUI(){
     T.core.invoke(act==='open-last'?'open_path':'reveal_path',{path:tp}).catch(function(err){log('打不开：'+err,false)})};
   $('recent').onclick=function(e){var o=e.target.dataset.open,r=e.target.dataset.reveal,z=e.target.dataset.zotero,i=o!=null?o:r;if(z!=null){importRecent(+z);return}if(i==null||!T)return;var it=recent[+i];if(!it||!it.path)return;
     T.core.invoke(o!=null?'open_path':'reveal_path',{path:it.path}).catch(function(err){log('打不开：'+err,false)})};
+  document.addEventListener('click',function(e){
+    var act=e.target&&e.target.dataset?e.target.dataset.act:null;if(!act)return;
+    if(act==='q-prev'&&queuePage>1){queuePage--;renderNow()}
+    else if(act==='q-next'){queuePage++;renderNow()}
+    else if(act==='rec-prev'&&recentPage>1){recentPage--;renderNow()}
+    else if(act==='rec-next'){recentPage++;renderNow()}
+    else if(act==='log-prev'&&logPage>1){logPage--;renderLog()}
+    else if(act==='log-next'){logPage++;renderLog()}});
 async function importRecent(i){
   var r=recent[i];if(!T||!r||r.zotero||r.importing||!r.path||!r.source)return;
   r.importing=true;renderNow();log('正在加入 Zotero：'+r.title);
@@ -300,7 +321,7 @@ async function importRecent(i){
     if(!ans.ok)throw new Error(ans.error||raw||'Zotero 没有确认导入');
     r.zotero=true;r.importing=false;lsSet('pdfyi_recent',JSON.stringify(recent));log('已加入 Zotero：'+(ans.title||r.title));refresh()}
   catch(e){r.importing=false;log('加入 Zotero 失败：'+(e.message||e),false);refresh()}}
-  document.querySelectorAll('#log-filter button').forEach(function(b){b.onclick=function(){logFilter=b.dataset.f;document.querySelectorAll('#log-filter button').forEach(function(x){x.classList.toggle('on',x===b)});renderLog()}});
+  document.querySelectorAll('#log-filter button').forEach(function(b){b.onclick=function(){logFilter=b.dataset.f;logPage=1;document.querySelectorAll('#log-filter button').forEach(function(x){x.classList.toggle('on',x===b)});renderLog()}});
   $('log-copy').onclick=function(){var t=logText();(navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(function(){$('log-copy').textContent='已复制'},function(){$('log-copy').textContent='复制失败'})};
   $('log-clear').onclick=function(){LOG=[];logSeenBad=0;logOpen={};renderLog()};
   $('log').onclick=function(e){var li=e.target.closest('li.more');if(!li||e.target.closest('.lg-full'))return;var id=li.dataset.id;if(logOpen[id])delete logOpen[id];else logOpen[id]=1;li.classList.toggle('open',!!logOpen[id])};

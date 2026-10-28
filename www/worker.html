@@ -99,7 +99,14 @@ ul.lst li:last-child{border-bottom:0}
 .lnk{border:0;background:none;padding:2px 4px;color:var(--tJ);cursor:pointer;font-size:12px}
 .lnk:hover{text-decoration:underline}
 .empty{color:var(--mute);font-size:12.5px;padding:4px 2px}
-
+.hd-row{display:flex;align-items:center;justify-content:space-between;margin:16px 0 6px}
+.hd-row h3{margin:0}
+.pager{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:10px}
+.pager.inline{margin:0;gap:4px}
+.pager-btn{border:0;background:var(--paper2);padding:2px 8px;font-size:11px;cursor:pointer;color:var(--ink2);box-shadow:var(--px2)}
+.pager-btn:hover:not([disabled]){background:var(--lav3)}
+.pager-btn[disabled]{opacity:0.35;cursor:default}
+.pager-txt{font-size:11.5px;color:var(--mute);font-variant-numeric:tabular-nums;padding:0 2px}
 /* ── 日志：时间线 ── */
 .logbar{display:flex;align-items:center;gap:6px;margin-bottom:12px}
 .seg{display:flex;box-shadow:var(--px2)}
@@ -155,8 +162,8 @@ ol.log li.open .lg-full{display:block}
   <section class="pane" id="tab-now">
     <div id="job"></div>
     <div class="actions"><button class="pxbtn main" id="btn-add">添加 PDF</button><button class="pxbtn" id="btn-reader">打开阅读器</button></div>
-    <h3>排队</h3><ul class="lst" id="queue"></ul>
-    <h3>最近翻好</h3><ul class="lst" id="recent"></ul>
+    <div class="hd-row"><h3>排队</h3><div class="pager inline" id="queue-pager"></div></div><ul class="lst" id="queue"></ul>
+    <div class="hd-row"><h3>最近翻好</h3><div class="pager inline" id="recent-pager"></div></div><ul class="lst" id="recent"></ul>
   </section>
   <section class="pane" id="tab-log" hidden>
     <div class="logbar">
@@ -165,7 +172,7 @@ ol.log li.open .lg-full{display:block}
       <button class="lnk" id="log-copy">复制</button><button class="lnk" id="log-clear">清空</button>
     </div>
     <ol class="log" id="log"></ol>
-  </section>
+    <div class="pager" id="log-pager"></div>
   <section class="pane" id="tab-bar" hidden>
     <div class="preview">
       <div class="bar light"><span>Wi‑Fi</span><canvas id="pv-light" height="44"></canvas><span>10:42</span></div>
