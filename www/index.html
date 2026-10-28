@@ -1,6 +1,15 @@
 <!--
-  版本: v48
+  版本: v49
   更新日志:
+  v49 (本次：按小宝实测的热点，改页面绘制和日志刷新):
+    - 小宝实测：翻译时 WebKit 的页面进程峰值 162.7%，网络这一层（Magpie、3426 反代、SSH 隧道）几乎是 0；
+      调用栈热点在图层合成、画布绘制和整块 innerHTML 重刷。
+    - PDF 页面按需绘制：打开书时只给每一页留出大小正确的空位，滚到附近（前后一屏半）才画，并补上文字层；
+      离开很远（五屏以外）的页释放画布。一次只画一页，排队来；排队期间已经滚走的页不再画。以前一打开就把整本书按 2 倍分辨率全部画完。
+    - 窗口藏起来（或者被别的窗口完全挡住）时停止绘制，回到前台接着画。
+    - API 日志只在设置面板打开时才生成；关着时只记数据，不碰页面。打开着的时候，最多每 0.5 秒刷新一次。
+      以前每发一个请求就把最近 30 条日志（含完整原文译文）整块重刷一遍。
+    - 导出（原文批注 PDF、双栏 PDF）照常可用：画布元素和它的显示尺寸一直保留，高亮位置照常换算。
   v48 (本次：一次多带上下文、少开并发，减轻 Mac 发热):
     - 翻译按字数分批，不再固定每 6 段一次：每次最多带约 3000 个英文字符（最多 24 段），一般一整页一次翻完，
       很长的页才拆成两三次。请求次数少了，一页的段落放在一起翻，前后文也更连贯。
@@ -1225,8 +1234,13 @@ function addTransLog(pageNum, input, output, model, type, ok){
    renderTransLog();
 }
 var _transLogTypeColors={'翻译':'var(--accent)','合并':'#8ab4d4','OCR清理':'#c8bfa0','目录解析':'#d4a8f0','词典':'#f0c674','连接测试':'#5ec4ff','拉取模型':'#5ec4ff','对话':'#e6a0d0'};
+var _transLogDirty=false,_transLogTimer=null;
 function renderTransLog(){
    var el=$('trans-log');if(!el)return;
+   // v49：设置面板关着时不生成；开着时最多每 0.5 秒刷新一次
+   var sp=$('settings-panel');if(sp&&!sp.classList.contains('open')){_transLogDirty=true;return}
+   if(_transLogTimer){_transLogDirty=true;return}
+   _transLogTimer=setTimeout(function(){_transLogTimer=null;if(_transLogDirty){_transLogDirty=false;renderTransLog()}},500);
    if(!_transLog.length){el.innerHTML='<div style="color:var(--text4);padding:6px 0">暂无日志</div>';return}
    el.innerHTML=_transLog.map(function(e,i){
       var tc=_transLogTypeColors[e.type]||'var(--accent)';
@@ -1875,6 +1889,8 @@ function saveAnnotationsToIDB(){idbSet('annotations',cacheKey+':hl',highlights)}
 // ══ Settings ══
 document.querySelectorAll('.model-opt').forEach(function(b){b.onclick=function(){activeModel=b.dataset.model;document.querySelectorAll('.model-opt').forEach(function(x){x.classList.toggle('active',x===b)});toggleModelUI(b.dataset.model)}});
 $('settings-btn').onclick=function(e){e.stopPropagation();$('settings-panel').classList.toggle('open')};
+// v49：设置面板一打开，把关着时积下的日志生成出来
+try{new MutationObserver(function(){if($('settings-panel').classList.contains('open')&&_transLogDirty){_transLogDirty=false;renderTransLog()}}).observe($('settings-panel'),{attributes:true,attributeFilter:['class']})}catch(e){}
    var mtb_mg=$('magpie-test-btn');if(mtb_mg)mtb_mg.addEventListener('click',function(){testProvider('magpie')});
    var mlb_mg=$('magpie-list-btn');if(mlb_mg)mlb_mg.addEventListener('click',function(){listProviderModels('magpie')});
    var otb=$('openai-test-btn');if(otb)otb.addEventListener('click',function(){testProvider('openai')});
@@ -3361,20 +3377,50 @@ async function loadPDF(file){
   if(pipeTotal===0){renderPdfPages();loadTOC()}}
 
 // ══ PDF Rendering ══
+// v49：PDF 页面按需绘制。先给每页留出大小正确的空位，滚到附近才画，离很远就释放；窗口藏起来时停画
+var _pdfNearObs=null,_pdfFarObs=null,_drawQ=[],_drawing=false,_drawGen=0;
 async function renderPdfPages(){
   var scroll=$('pdf-scroll');scroll.innerHTML='';var containerW=Math.max(scroll.clientWidth,scroll.offsetWidth,500);
+  var gen=++_drawGen;_drawQ=[];
+  if(_pdfNearObs){_pdfNearObs.disconnect();_pdfNearObs=null}if(_pdfFarObs){_pdfFarObs.disconnect();_pdfFarObs=null}
   for(var p=1;p<=totalPages;p++){try{
-    var pg=await pdfDoc.getPage(p);var scrollW=Math.max(containerW-32,200);var baseVp=pg.getViewport({scale:1});
-    var scale=Math.max(0.3,(scrollW/baseVp.width)*zoomLevel);var dpr=window.devicePixelRatio||1;
-    var vp=pg.getViewport({scale:scale});var vpHD=pg.getViewport({scale:scale*dpr});
-    var wrap=document.createElement('div');wrap.className='page-wrap';wrap.id='pdf-wrap-'+p;wrap.dataset.page=String(p);wrap.dataset.pageNumber=String(p);
+    var pg=await pdfDoc.getPage(p);if(gen!==_drawGen)return;
+    var scrollW=Math.max(containerW-32,200);var baseVp=pg.getViewport({scale:1});
+    var scale=Math.max(0.3,(scrollW/baseVp.width)*zoomLevel);var vp=pg.getViewport({scale:scale});
+    var wrap=document.createElement('div');wrap.className='page-wrap';wrap.id='pdf-wrap-'+p;wrap.dataset.page=String(p);wrap.dataset.pageNumber=String(p);wrap.dataset.scale=String(scale);
     wrap.style.width=Math.floor(vp.width)+'px';wrap.style.height=Math.floor(vp.height)+'px';
-    var canvas=document.createElement('canvas');canvas.width=Math.floor(vpHD.width);canvas.height=Math.floor(vpHD.height);
+    // 画布先放着、不画：导出时要读它的显示尺寸来换算高亮位置
+    var canvas=document.createElement('canvas');canvas.width=0;canvas.height=0;
     canvas.style.width=Math.floor(vp.width)+'px';canvas.style.height=Math.floor(vp.height)+'px';wrap.appendChild(canvas);
     var hlLayer=document.createElement('div');hlLayer.className='hl-layer';hlLayer.id='hl-layer-'+p;wrap.appendChild(hlLayer);scroll.appendChild(wrap);
+  }catch(e){}}
+  rerenderHL();
+  if(typeof IntersectionObserver!=='function'){scroll.querySelectorAll('.page-wrap').forEach(function(w){_queueDraw(w,gen)});return}
+  _pdfNearObs=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting)_queueDraw(e.target,gen)})},{root:scroll,rootMargin:'150% 0px'});
+  _pdfFarObs=new IntersectionObserver(function(es){es.forEach(function(e){if(!e.isIntersecting)_releasePage(e.target)})},{root:scroll,rootMargin:'500% 0px'});
+  scroll.querySelectorAll('.page-wrap').forEach(function(w){_pdfNearObs.observe(w);_pdfFarObs.observe(w)})}
+// 这一页现在离眼前是不是在一屏半以内
+function _isNear(w){var root=$('pdf-scroll'),r=w.getBoundingClientRect(),R=root.getBoundingClientRect(),h=R.height||800;return r.bottom>R.top-1.5*h&&r.top<R.bottom+1.5*h}
+function _queueDraw(w,gen){if(w._drawn||w._queued)return;w._queued=true;_drawQ.push(w);_pumpDraw(gen)}
+async function _pumpDraw(gen){
+  if(_drawing)return;_drawing=true;
+  try{while(_drawQ.length&&gen===_drawGen){
+    if(document.hidden)return;// 窗口藏起来：先停，回到前台再接着画
+    var w=_drawQ.shift();w._queued=false;if(w._drawn||!w.isConnected||!_isNear(w))continue;// 排队期间已经滚走的页不画
+    await _drawPage(w,gen);await new Promise(function(r){setTimeout(r,0)})}}
+  finally{_drawing=false}}
+document.addEventListener('visibilitychange',function(){if(!document.hidden&&_drawQ.length)_pumpDraw(_drawGen)});
+async function _drawPage(w,gen){
+  try{
+    var p=+w.dataset.page,pg=await pdfDoc.getPage(p);if(gen!==_drawGen)return;
+    var scale=+w.dataset.scale,dpr=window.devicePixelRatio||1;
+    var vp=pg.getViewport({scale:scale}),vpHD=pg.getViewport({scale:scale*dpr});
+    var canvas=w.querySelector('canvas');canvas.width=Math.floor(vpHD.width);canvas.height=Math.floor(vpHD.height);
     await pg.render({canvasContext:canvas.getContext('2d'),viewport:vpHD}).promise;
+    if(gen!==_drawGen)return;
     try{
-      var tc2=await pg.getTextContent();
+      var tc2=await pg.getTextContent();if(gen!==_drawGen)return;
+      var old=w.querySelector('.text-layer');if(old)old.remove();
       var tl=document.createElement('div');tl.className='text-layer';
       tl.style.width=Math.floor(vp.width)+'px';tl.style.height=Math.floor(vp.height)+'px';
       tc2.items.forEach(function(item){
@@ -3387,10 +3433,12 @@ async function renderPdfPages(){
         var sx=item.width?(item.width*scale/(fs*item.str.length||1)):1;
         if(sx&&isFinite(sx)&&sx>0.1&&sx<5)sp.style.transform='scaleX('+sx.toFixed(3)+')';
         tl.appendChild(sp)});
-      wrap.insertBefore(tl,hlLayer);
+      w.insertBefore(tl,w.querySelector('.hl-layer'));
     }catch(ex){}
-    }catch(e){}}
-  rerenderHL()}
+    w._drawn=true;
+  }catch(e){console.warn('第'+w.dataset.page+'页没画出来',e)}}
+// 离开很远的页：释放画布和文字层（高亮层保留）
+function _releasePage(w){if(!w._drawn)return;var c=w.querySelector('canvas');if(c){c.width=0;c.height=0}var tl=w.querySelector('.text-layer');if(tl)tl.remove();w._drawn=false}
 async function rerenderPdf(){if(!pdfDoc)return;var s=$('pdf-scroll'),r=s.scrollTop/(s.scrollHeight||1);await renderPdfPages();setTimeout(function(){s.scrollTop=r*s.scrollHeight},50)}
 
 // ══ Text Extraction ══
