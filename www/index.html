@@ -1,6 +1,11 @@
 <!--
-  版本: v55
+  版本: v56
   更新日志:
+  v56 (本次：自动术语表，全书译名统一):
+    - 一本书开始翻译前，从前 5 页正文里取最多 6000 个字符，请模型挑出会反复出现的术语和人名、地名、机构名（最多 40 条），
+      各给一个中文学界通用的译法。存在这本书的缓存里，下次打开不再提取；整本都有译文时不提取。
+    - 翻译每一批段落时，只把这一批里实际出现的术语附进提示词（最多 25 条），全书同一个词用同一个译法。
+    - 提取结果写进日志（类型“术语表”）。设置里“自动术语表”可以关。后台引擎同样会用。
   v55 (本次：双栏论文按栏对照):
     - 双栏 PDF 里，两栏排版、中间没有通栏内容的页，拆成两张：左栏一张、右栏一张，每张是“这一栏原文 + 这一栏译文”。
       每张只按这一栏文字实际所在的范围切，译文区是这一栏的 1.35 倍宽、行距 1.38 倍（中文同字号时要多占地方），
@@ -1001,6 +1006,7 @@ mark.align-hl{background:color-mix(in srgb,var(--tS) 22%,transparent);color:inhe
     <span id="openai-status" style="font-size:10px;margin-left:6px"></span>
   </div>
   <div class="s-row"><label for="bp-size">双栏 PDF 译文字号</label><select id="bp-size" style="flex:2;min-width:0;padding:4px;font-size:11px"><option value="10.5">小（10.5pt）</option><option value="12" selected>中（12pt）</option><option value="13.5">大（13.5pt）</option></select></div>
+  <div class="s-row"><label for="glossary-on">自动术语表</label><input type="checkbox" id="glossary-on" style="accent-color:var(--tJ)"></div>
   <div class="s-row"><label for="bp-cols">双栏论文按栏对照</label><input type="checkbox" id="bp-cols" style="accent-color:var(--tJ)"></div>
   <div class="s-row"><label for="auto-bipdf">翻完自动生成双栏 PDF</label><input type="checkbox" id="auto-bipdf" style="accent-color:var(--tJ)"></div>
   <div class="s-row" id="conc-row"><label for="conc-select">同时发几个请求</label>
@@ -3200,6 +3206,7 @@ async function _pageColumns(pg,W,srcParas,n,bbs){
 
 // ══ v45：译文字号 ══
 function bpFontSize(){var v=12;try{v=parseFloat(localStorage.getItem('pdfyi_bp_size'))||12}catch(e){}return [10.5,12,13.5].indexOf(v)>=0?v:12}
+(function(){var g=$('glossary-on');if(g){g.checked=glossaryOn();g.onchange=function(){try{localStorage.setItem('pdfyi_glossary',g.checked?'1':'0')}catch(e){}}}})();
 (function(){var cb=$('bp-cols');if(cb){cb.checked=bpColumns();cb.onchange=function(){try{localStorage.setItem('pdfyi_bp_cols',cb.checked?'1':'0')}catch(e){}}}})();
 (function(){var sel=$('bp-size');if(!sel)return;sel.value=String(bpFontSize());sel.onchange=function(){try{localStorage.setItem('pdfyi_bp_size',sel.value)}catch(e){}toast('双栏 PDF 译文字号：'+sel.options[sel.selectedIndex].text,'ok')}})();
 
@@ -3364,6 +3371,8 @@ async function loadPDF(file){
   var _sc=null;try{_sc=await idbGet('annotations',myKey+':clean')}catch(e){}
   if(cacheKey!==myKey)return;
   if(_sc&&_sc.running)cleanRules=_sc;
+  // v56：有没翻的页，就开始提取术语表（翻译前会等它，最多 90 秒）
+  _glossary=[];window._glossaryP=Object.keys(memCache).length<totalPages?Promise.race([buildGlossary(),new Promise(function(r){setTimeout(r,90000)})]).catch(function(){}):null;
   // 旧缓存：缓存里没有原文分段，或者是“隐藏页眉页脚”之前翻的（没有 cv 标记，这本书也没有确认过的规则）
   var _oldPages=Object.keys(memCache).map(Number).filter(function(p){var se=savedEnCache[p];return !se||(se.cv===undefined&&!(_sc&&_sc.running))||!!pageTextQuality(se.texts)});
   var _noMig=false;try{_noMig=!!(await idbGet('annotations',cacheKey+':noMigrate'))}catch(e){}
@@ -3763,6 +3772,7 @@ async function doTranslate(p,paras,docKey){
   // pageTextCache已在提取阶段AI合并，此处直接使用
   var zhP=$('zh-page-'+p);if(zhP){zhP.innerHTML='';var l=document.createElement('div');l.className='zh-page-label';l.textContent='第 '+p+' 页 · 翻译中…';zhP.appendChild(l);
     paras.forEach(function(){var s=document.createElement('div');s.className='skeleton';var ln=document.createElement('div');ln.className='skel-line';ln.style.width=(55+Math.random()*40)+'%';s.appendChild(ln);zhP.appendChild(s)})}
+  if(window._glossaryP){try{await window._glossaryP}catch(e){}if(cacheKey!==ck0)return}
   var BUDGET=3000,MAXN=24,results=new Array(paras.length),need=[],done=0,failed=0;
   // v40：以中文为主的段落原样保留，只翻其余的
   paras.forEach(function(t,i){if(_isZhPara(t)){results[i]=t;done++}else need.push(i)});
@@ -4153,10 +4163,46 @@ function exportPrintHtml(mode){
   win.document.write(html);win.document.close();setTimeout(function(){win.focus();win.print()},800);toast('已打开打印预览，选择"另存为 PDF" ✓','ok')}
 
 // ══ API ══
+// ══ v56：自动术语表 ══
+var _glossary=[];
+function glossaryOn(){try{return localStorage.getItem('pdfyi_glossary')!=='0'}catch(e){return true}}
+// 这一批段落里实际出现的术语，拼成提示词里的几行（最多 25 条）
+function _glossaryFor(texts){
+  if(!_glossary||!_glossary.length)return '';
+  var all=texts.join('\n').toLowerCase(),hit=[];
+  _glossary.forEach(function(g){if(hit.length<25&&g[0]&&all.indexOf(String(g[0]).toLowerCase())>=0)hit.push('- '+g[0]+' → '+g[1])});
+  return hit.join('\n')}
+// 开始翻译前提取一次：前 5 页正文、最多 6000 字符；存进这本书的缓存
+async function buildGlossary(){
+  _glossary=[];if(!glossaryOn()||!pdfDoc)return _glossary;
+  var key=cacheKey+':glossary';
+  try{var saved=await idbGet('annotations',key);if(saved&&Array.isArray(saved.terms)){_glossary=saved.terms;return _glossary}}catch(e){}
+  var txt='';
+  for(var p=1;p<=Math.min(5,totalPages)&&txt.length<6000;p++){try{var bl=await bodyLines(p);txt+=bl.map(function(x){return x.s}).join(' ')+'\n'}catch(e){}}
+  txt=txt.slice(0,6000);if(txt.replace(/\s/g,'').length<200)return _glossary;
+  var prompt='You are preparing a glossary for translating an academic text from English into Simplified Chinese.\n'
+    +'From the text below, pick up to 40 items that will recur and must be translated consistently: key technical terms and concepts, '
+    +'and proper nouns (people, places, organisations, programmes). For each, give the standard translation used in Chinese academic writing. '
+    +'For people, give the usual Chinese transliteration. Skip common words.\n'
+    +'Return ONLY a JSON array of [English, Chinese] pairs, no explanation, no markdown. Example: [["political ecology","政治生态学"],["Bruno Latour","布鲁诺·拉图尔"]]\n\n'+txt;
+  try{
+    var body={model:getMagpieModel(),messages:[{role:'user',content:prompt}],temperature:0,max_tokens:4000};
+    var h=new Headers();h.append('Authorization','Bearer '+getKey('magpie'));
+    var resp=await fetch(getMagpieUrl(),{method:'POST',headers:h,body:new Blob([JSON.stringify(body)],{type:'application/json'})});
+    if(!resp.ok)throw new Error('HTTP '+resp.status);
+    var raw=getMsgContent(await resp.json()),a0=raw.indexOf('['),a1=raw.lastIndexOf(']');
+    var arr=JSON.parse(raw.slice(a0,a1+1)),seen={};
+    _glossary=(Array.isArray(arr)?arr:[]).filter(function(g){return Array.isArray(g)&&g.length>=2&&typeof g[0]==='string'&&typeof g[1]==='string'
+      &&g[0].trim().length>=2&&g[0].length<=60&&g[1].trim().length>=1&&g[1].length<=40&&!seen[g[0].toLowerCase()]&&(seen[g[0].toLowerCase()]=1)})
+      .slice(0,40).map(function(g){return [g[0].trim(),g[1].trim()]});
+    await idbSet('annotations',key,{terms:_glossary,at:Date.now()});
+    addTransLog('?','',_glossary.length+' 条：'+_glossary.map(function(g){return g[0]+'='+g[1]}).join('；'),activeModel,'术语表',true);
+  }catch(e){_glossary=[];addTransLog('?','','没提取成（不影响翻译）：'+(e.message||e),activeModel,'术语表',false)}
+  return _glossary}
 async function apiBatch(apiKey,texts,pageNum){
   pageNum=pageNum===undefined?'?':pageNum;
   var FAIL='__TRANSFAIL__',myKey=cacheKey;
-  var n=texts.length;var prompt='Translate the following '+n+' English paragraphs to Simplified Chinese.\nReturn EXACTLY '+n+' translations numbered [1][2] etc.\nOnly return the translations.\n\n'+texts.map(function(t,i){return '['+(i+1)+'] '+t}).join('\n\n');
+  var n=texts.length,_gl=_glossaryFor(texts);var prompt='Translate the following '+n+' English paragraphs to Simplified Chinese.\n'+(_gl?'Use these Chinese translations for the listed terms, consistently:\n'+_gl+'\n':'')+'Return EXACTLY '+n+' translations numbered [1][2] etc.\nOnly return the translations.\n\n'+texts.map(function(t,i){return '['+(i+1)+'] '+t}).join('\n\n');
   try{var url,body;
     if(activeModel==='magpie'){url=getMagpieUrl();body={model:getMagpieModel(),messages:[{role:'user',content:prompt}],temperature:.3,max_tokens:8192}}
     else if(activeModel==='deepseek'){url='https://api.deepseek.com/v1/chat/completions';body=Object.assign({model:getModelName('deepseek'),messages:[{role:'user',content:prompt}],temperature:.3,max_tokens:8192},getThinkingParams('deepseek'))}

@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v55.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v56.html 原样移植生成，逻辑与全量版一致。
 // 翻译：只走 Magpie。配置和全量版共用同一份浏览器存储（端点、模型）。
 var activeModel='magpie';
 function getMagpieUrl(){var e='';try{e=(localStorage.getItem('pdfyi_magpie_endpoint')||'').trim()}catch(x){}var u=(e||'http://127.0.0.1:3426/v1').replace(/\/+$/,'');
@@ -6,6 +6,7 @@ function getMagpieUrl(){var e='';try{e=(localStorage.getItem('pdfyi_magpie_endpo
 function getMagpieModel(){var m='',c='';try{m=localStorage.getItem('pdfyi_magpie_model')||'';c=(localStorage.getItem('pdfyi_magpie_model_custom')||'').trim()}catch(x){}
   if(m==='__custom__')return c||'auto/gemini-3.8-flash';return m||'auto/gemini-3.8-flash'}
 function getKey(){return 'sk-antigravity'}
+var _glossary=[];
 // ══ v36：发给模型的请求统一重试一次（5xx / 超时 / 网络错误 / 返回不是完整 JSON） ══
 (function(){
   var _f=window.fetch.bind(window);
@@ -42,6 +43,38 @@ function getKey(){return 'sk-antigravity'}
     }
   };
 })();
+function glossaryOn(){try{return localStorage.getItem('pdfyi_glossary')!=='0'}catch(e){return true}}
+function _glossaryFor(texts){
+  if(!_glossary||!_glossary.length)return '';
+  var all=texts.join('\n').toLowerCase(),hit=[];
+  _glossary.forEach(function(g){if(hit.length<25&&g[0]&&all.indexOf(String(g[0]).toLowerCase())>=0)hit.push('- '+g[0]+' → '+g[1])});
+  return hit.join('\n')}
+async function buildGlossary(){
+  _glossary=[];if(!glossaryOn()||!pdfDoc)return _glossary;
+  var key=cacheKey+':glossary';
+  try{var saved=await idbGet('annotations',key);if(saved&&Array.isArray(saved.terms)){_glossary=saved.terms;return _glossary}}catch(e){}
+  var txt='';
+  for(var p=1;p<=Math.min(5,totalPages)&&txt.length<6000;p++){try{var bl=await bodyLines(p);txt+=bl.map(function(x){return x.s}).join(' ')+'\n'}catch(e){}}
+  txt=txt.slice(0,6000);if(txt.replace(/\s/g,'').length<200)return _glossary;
+  var prompt='You are preparing a glossary for translating an academic text from English into Simplified Chinese.\n'
+    +'From the text below, pick up to 40 items that will recur and must be translated consistently: key technical terms and concepts, '
+    +'and proper nouns (people, places, organisations, programmes). For each, give the standard translation used in Chinese academic writing. '
+    +'For people, give the usual Chinese transliteration. Skip common words.\n'
+    +'Return ONLY a JSON array of [English, Chinese] pairs, no explanation, no markdown. Example: [["political ecology","政治生态学"],["Bruno Latour","布鲁诺·拉图尔"]]\n\n'+txt;
+  try{
+    var body={model:getMagpieModel(),messages:[{role:'user',content:prompt}],temperature:0,max_tokens:4000};
+    var h=new Headers();h.append('Authorization','Bearer '+getKey('magpie'));
+    var resp=await fetch(getMagpieUrl(),{method:'POST',headers:h,body:new Blob([JSON.stringify(body)],{type:'application/json'})});
+    if(!resp.ok)throw new Error('HTTP '+resp.status);
+    var raw=getMsgContent(await resp.json()),a0=raw.indexOf('['),a1=raw.lastIndexOf(']');
+    var arr=JSON.parse(raw.slice(a0,a1+1)),seen={};
+    _glossary=(Array.isArray(arr)?arr:[]).filter(function(g){return Array.isArray(g)&&g.length>=2&&typeof g[0]==='string'&&typeof g[1]==='string'
+      &&g[0].trim().length>=2&&g[0].length<=60&&g[1].trim().length>=1&&g[1].length<=40&&!seen[g[0].toLowerCase()]&&(seen[g[0].toLowerCase()]=1)})
+      .slice(0,40).map(function(g){return [g[0].trim(),g[1].trim()]});
+    await idbSet('annotations',key,{terms:_glossary,at:Date.now()});
+    addTransLog('?','',_glossary.length+' 条：'+_glossary.map(function(g){return g[0]+'='+g[1]}).join('；'),activeModel,'术语表',true);
+  }catch(e){_glossary=[];addTransLog('?','','没提取成（不影响翻译）：'+(e.message||e),activeModel,'术语表',false)}
+  return _glossary}
 async function aiMergeLines(rawLines,apiKey){
   // 过滤掉纯空行，编号，送AI
   var numbered=[];var lineMap=[];
@@ -90,7 +123,7 @@ async function aiMergeLines(rawLines,apiKey){
 async function apiBatch(apiKey,texts,pageNum){
   pageNum=pageNum===undefined?'?':pageNum;
   var FAIL='__TRANSFAIL__',myKey=cacheKey;
-  var n=texts.length;var prompt='Translate the following '+n+' English paragraphs to Simplified Chinese.\nReturn EXACTLY '+n+' translations numbered [1][2] etc.\nOnly return the translations.\n\n'+texts.map(function(t,i){return '['+(i+1)+'] '+t}).join('\n\n');
+  var n=texts.length,_gl=_glossaryFor(texts);var prompt='Translate the following '+n+' English paragraphs to Simplified Chinese.\n'+(_gl?'Use these Chinese translations for the listed terms, consistently:\n'+_gl+'\n':'')+'Return EXACTLY '+n+' translations numbered [1][2] etc.\nOnly return the translations.\n\n'+texts.map(function(t,i){return '['+(i+1)+'] '+t}).join('\n\n');
   try{var url,body;
     if(activeModel==='magpie'){url=getMagpieUrl();body={model:getMagpieModel(),messages:[{role:'user',content:prompt}],temperature:.3,max_tokens:8192}}
     else if(activeModel==='deepseek'){url='https://api.deepseek.com/v1/chat/completions';body=Object.assign({model:getModelName('deepseek'),messages:[{role:'user',content:prompt}],temperature:.3,max_tokens:8192},getThinkingParams('deepseek'))}

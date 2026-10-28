@@ -1,5 +1,5 @@
 import re, json, os, sys
-READER = '/mnt/user-data/outputs/pdf-reader-v55.html'
+READER = '/mnt/user-data/outputs/pdf-reader-v56.html'
 OUT = '/home/claude/build/www/core'
 os.makedirs(OUT, exist_ok=True)
 s = open(READER, encoding='utf-8').read(); js = s[s.index('<script>\n'):]
@@ -16,7 +16,7 @@ def fn(name):
 def line(prefix):
     m = re.search(r'(?m)^' + re.escape(prefix) + r'[^\n]*', js); assert m, prefix; return m.group(0)
 def take(*names): return '\n'.join(fn(n) for n in names)
-HEAD = '// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v55.html 原样移植生成，逻辑与全量版一致。\n'
+HEAD = '// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v56.html 原样移植生成，逻辑与全量版一致。\n'
 
 # ── textutil.js：纯文字处理，不碰页面 ──
 textutil = HEAD + '''// 文字工具：拼接、康熙部首、上标、分栏、句末判断、断行。全部是纯函数。
@@ -52,7 +52,8 @@ function getMagpieUrl(){var e='';try{e=(localStorage.getItem('pdfyi_magpie_endpo
 function getMagpieModel(){var m='',c='';try{m=localStorage.getItem('pdfyi_magpie_model')||'';c=(localStorage.getItem('pdfyi_magpie_model_custom')||'').trim()}catch(x){}
   if(m==='__custom__')return c||'auto/gemini-3.8-flash';return m||'auto/gemini-3.8-flash'}
 function getKey(){return 'sk-antigravity'}
-''' + retry + '\n' + take('aiMergeLines', 'apiBatch') + r'''
+var _glossary=[];
+''' + retry + '\n' + take('glossaryOn', '_glossaryFor', 'buildGlossary', 'aiMergeLines', 'apiBatch') + r'''
 // 翻译一页：中文段落原样保留；按字数分批（约 3000 字符、最多 24 段）；没翻好的对半拆开重翻，最多三层
 async function translatePage(p,paras,onBatch){
   var apiKey=getKey(),BUDGET=3000,MAXN=24,results=new Array(paras.length),need=[],ck0=cacheKey;

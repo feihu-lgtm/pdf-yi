@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v55.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v56.html 原样移植生成，逻辑与全量版一致。
 // 文字工具：拼接、康熙部首、上标、分栏、句末判断、断行。全部是纯函数。
 var VENDOR=window.PDFYI_VENDOR||'vendor/';
 var _TERM=/[.!?。！？…]["”’)\]）」』》]*(\d{0,3}|[⁰¹²³⁴⁵⁶⁷⁸⁹*†‡]{0,3})$/;

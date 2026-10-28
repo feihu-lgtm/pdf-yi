@@ -50,6 +50,8 @@ async function run(j){
   if(saved&&saved.running)cleanRules=saved;
   else{var au=await autoCleanRules(),v2=await validateCleanRules(null,au.running);
     cleanRules={running:v2.running,refs:null,skip:[],hide:true,from:'后台自动识别'};await idbSet('annotations',cacheKey+':clean',cleanRules)}
+  // v56：术语表（全书译名统一）；最多等 90 秒，没提取成也照常翻
+  try{await Promise.race([buildGlossary(),new Promise(function(r){setTimeout(r,90000)})]);if(_glossary.length)log('术语表 '+_glossary.length+' 条')}catch(e){}
   // 逐页：并发按设置，暂停时不再取新页
   var order=[];for(var q=1;q<=totalPages;q++)order.push(q);var pos=0,active=0;
   await new Promise(function(resolve){
