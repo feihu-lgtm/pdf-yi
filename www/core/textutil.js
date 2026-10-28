@@ -19,6 +19,16 @@ function pageTextQuality(lines){
   if(ns===0)return {kind:'empty',msg:'这一页提取不到正文文字（一个字都没有，或者只读出了页码）：可能是扫描件、整页图片、空白页，或者字体缺少字符映射。'};
   if(ns>=15&&letters/ns<0.35)return {kind:'garbled',msg:'这一页的字读不出来，只剩标点和数字：可能是扫描件，或者字体缺少字符映射。'};
   return null}
+function _bandGutter(lines,x0,x1,fsOf){
+  var iv=[];lines.forEach(function(L){L.forEach(function(it){iv.push([x0(it),x1(it)])})});
+  iv.sort(function(a,b){return a[0]-b[0]});
+  var fs=Math.max.apply(null,lines.map(fsOf)),best=null,end=-Infinity;
+  for(var i=0;i<iv.length;i++){
+    if(end>-Infinity&&iv[i][0]-end>=fs&&(!best||iv[i][0]-end>best.w))best={x:(iv[i][0]+end)/2,w:iv[i][0]-end};
+    if(iv[i][1]>end)end=iv[i][1]}
+  if(!best)return null;
+  var nl=0,nr=0;lines.forEach(function(L){if(L.some(function(it){return x1(it)<=best.x}))nl++;if(L.some(function(it){return x0(it)>=best.x}))nr++});
+  return nl>=2&&nr>=2?best.x:null}
 function _colOrder(items,W){
   var its=items.filter(function(it){return it&&it.str&&it.str.trim()});
   _colOrder.info=null;
@@ -34,18 +44,43 @@ function _colOrder(items,W){
   if(!best||best.both<5||best.free<5||best.free<best.both*0.6)return items;
   var sx=best.sx,ys=function(L){return L[0].transform[5]};
   lines.sort(function(a,b){return ys(b)-ys(a)});
+  lines.forEach(function(L){L.sort(function(a,b){return x0(a)-x0(b)})});
+  var isFull=function(L){return L.some(function(it){return x0(it)<sx-4&&x1(it)>sx+4})};
   // v55：记下分界线，以及页面中间（去掉上下各 8%）横跨两栏的行数，按栏对照时要用
   var yTop=ys(lines[0]),yBot=ys(lines[lines.length-1]),span=Math.max(1,yTop-yBot),fullMid=0;
-  lines.forEach(function(L){var y=ys(L);if(y<yTop-span*0.08&&y>yBot+span*0.08&&L.some(function(it){return x0(it)<sx-4&&x1(it)>sx+4}))fullMid++});
+  lines.forEach(function(L){var y=ys(L);if(y<yTop-span*0.08&&y>yBot+span*0.08&&isFull(L))fullMid++});
   _colOrder.info={sx:sx,fullMid:fullMid};
+  var fsOf=function(L){return Math.max.apply(null,L.map(function(it){var t=it.transform;return Math.hypot(t[0],t[1])||Math.abs(t[3])||0}))||10};
+  // v60：最上和最下一行（页眉、页脚）离正文明显远时整行保留，不拆进左右栏，否则右栏页眉会混进右栏正文中间
+  var gaps=[];for(var i=1;i<lines.length;i++)gaps.push(ys(lines[i-1])-ys(lines[i]));
+  var gs=gaps.slice().sort(function(a,b){return a-b}),gMed=gs.length?gs[Math.floor(gs.length/2)]:0;
+  var whole={};
+  if(lines.length>2&&gaps[0]>gMed*1.5)whole[0]=1;
+  if(lines.length>2&&gaps[gaps.length-1]>gMed*1.5)whole[lines.length-1]=1;
+  // v60：横跨分界线的连续几行里，如果有一条所有行都不压的最宽竖缝（比如左边关键词、右边摘要），按这条缝再分左右
+  var band={};
+  for(var a=0;a<lines.length;a++){
+    if(whole[a]||!isFull(lines[a]))continue;
+    var b=a;for(var k=a+1;k<lines.length&&!whole[k]&&ys(lines[b])-ys(lines[k])<=fsOf(lines[b])*3;k++)if(isFull(lines[k]))b=k;
+    var fulls=0;for(k=a;k<=b;k++)if(isFull(lines[k]))fulls++;
+    if(fulls<2){a=b;continue}
+    var cut=_bandGutter(lines.slice(a,b+1),x0,x1,fsOf);
+    if(cut===null){a=b;continue}
+    var crosses=function(L){return L.some(function(it){return x0(it)<cut&&x1(it)>cut})};
+    var s=a,e=b;
+    if(s>0&&!whole[s-1]&&!band[s-1]&&ys(lines[s-1])-ys(lines[s])<=fsOf(lines[s-1])*3&&!crosses(lines[s-1]))s--;
+    if(e<lines.length-1&&!whole[e+1]&&ys(lines[e])-ys(lines[e+1])<=fsOf(lines[e])*3&&!crosses(lines[e+1]))e++;
+    for(k=s;k<=e;k++)band[k]={s:s,e:e,cut:cut};
+    a=e}
   var out=[],blockL=[],blockR=[];
   var flush=function(){blockL.forEach(function(L){out.push.apply(out,L)});blockR.forEach(function(L){out.push.apply(out,L)});blockL=[];blockR=[]};
-  lines.forEach(function(L){
-    L.sort(function(a,b){return x0(a)-x0(b)});
-    var full=L.some(function(it){return x0(it)<sx-4&&x1(it)>sx+4});
-    if(full){flush();out.push.apply(out,L);return}
+  for(var i=0;i<lines.length;i++){var L=lines[i];
+    if(band[i]){var bd=band[i],bl=[],br=[];flush();
+      for(var k=bd.s;k<=bd.e;k++)lines[k].forEach(function(it){((x0(it)+x1(it))/2<bd.cut?bl:br).push(it)});
+      out.push.apply(out,bl);out.push.apply(out,br);i=bd.e;continue}
+    if(whole[i]||isFull(L)){flush();out.push.apply(out,L);continue}
     var l=L.filter(function(it){return (x0(it)+x1(it))/2<sx}),r=L.filter(function(it){return (x0(it)+x1(it))/2>=sx});
-    if(l.length)blockL.push(l);if(r.length)blockR.push(r)});
+    if(l.length)blockL.push(l);if(r.length)blockR.push(r)}
   flush();
   return out}
 function extractParas(tc,viewport){
@@ -72,15 +107,29 @@ function extractParas(tc,viewport){
   if(cur.trim())lines.push({str:_supTidy(cur.trim()),y:prevY,items:curItems,fs:_lineFs(curItems)});
   // ── 规则预合并：行间距异常大（段落空白行）才强制断段，其余全部暂时合入同一组 ──
   // 真正的段落边界由 aiMergeLines 决定；这里只做行→初步分组
+  // v60：版面断段。AI 合并失败时只剩这里的分组；双栏正文段间没有空行，要靠首行缩进、段末短行、编号标题来断
+  var _info=_colOrder.info,_mode=function(a){var c={},b=null;a.forEach(function(v){c[v]=(c[v]||0)+1;if(b===null||c[v]>c[b])b=v});return b===null||c[b]<3?null:+b};
+  lines.forEach(function(ln){var its=ln.items.filter(function(it){return it.str&&it.str.trim()&&!it._sup});if(!its.length)its=ln.items;
+    ln.lx=Math.min.apply(null,its.map(function(it){return it.transform[4]}));ln.rx=Math.max.apply(null,its.map(function(it){return it.transform[4]+(it.width||0)}));
+    ln.col=!_info?'A':ln.rx<=_info.sx+4?'L':ln.lx>=_info.sx-4?'R':'F'});
+  var _edge={};['A','L','R','F'].forEach(function(c){var ls=lines.filter(function(l){return l.col===c});_edge[c]={l:_mode(ls.map(function(l){return Math.round(l.lx)})),r:_mode(ls.map(function(l){return Math.round(l.rx)}))}});
+  var _flushL=function(l){var e=_edge[l.col].l;return e!==null&&Math.abs(l.lx-e)<(l.fs||bodyFs||10)*0.6};
+  var _layoutBreak=function(prev,ln,next){
+    if(!prev||prev.col!==ln.col||ln.y>=prev.y||!_TERM.test(prev.str))return false;
+    var fs=ln.fs||bodyFs||10,e=_edge[ln.col];
+    if(/^\d+(\.\d+)*\.?\s+[A-Z\u4e00-\u9fff]/.test(ln.str))return true;// 编号标题或编号条目
+    if(e.r!==null&&prev.rx<e.r-fs*3)return true;// 上一行明显没写满：段末
+    var ind=e.l===null?0:ln.lx-e.l;
+    return ind>=fs*0.6&&ind<=fs*3.5&&_flushL(prev)&&(!next||next.col!==ln.col||_flushL(next))};// 首行缩进；排除参考文献的悬挂缩进
   var paras=[],paraLines=[];
   for(var i=0;i<lines.length;i++){
     var ln=lines[i];if(!ln.str){if(paraLines.length){paras.push(paraLines.slice());paraLines=[]}continue}
     // 行间距超过字高1.8倍视为段落空行
     if(paraLines.length&&i>0){
       var gap=Math.abs(ln.y-lines[i-1].y);var approxLineH=14;
-      if(gap>approxLineH*1.8){paras.push(paraLines.slice());paraLines=[ln];continue}}
+      if(gap>approxLineH*1.8||_layoutBreak(lines[i-1],ln,lines[i+1])){paras.push(paraLines.slice());paraLines=[ln];continue}}
     paraLines.push(ln)}
-  if(paraLines.length)paras.push(paraLines);
+
   var texts=[],bboxes=[],rawLines=[],rawYs=[],rawFs=[];
   paras.forEach(function(pls){
     // 把每个初步分组里的行逐行记录，供AI合并

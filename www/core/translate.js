@@ -119,7 +119,7 @@ async function aiMergeLines(rawLines,apiKey){
       if(merged.length>2){result.push(merged);idxGroups.push(idxs)}});
     result._idx=idxGroups;
     return result.length>0?result:null;// null → fallback到规则结果
-  }catch(e){console.warn('aiMergeLines failed:',e.message);return null}}
+  }catch(e){console.warn('aiMergeLines failed:',e.message);try{addTransLog('?','','合并失败：'+(e.message||e)+'，改用版面分段',activeModel,'合并',false)}catch(_){}return null}}
 async function apiBatch(apiKey,texts,pageNum){
   pageNum=pageNum===undefined?'?':pageNum;
   var FAIL='__TRANSFAIL__',myKey=cacheKey;

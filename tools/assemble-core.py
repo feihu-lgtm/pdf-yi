@@ -1,6 +1,6 @@
 import re, json, os, sys
-READER = '/mnt/user-data/outputs/pdf-reader-v58.html'
-OUT = '/home/claude/build/www/core'
+READER = os.path.join(os.path.dirname(__file__), '../www/index.html')
+OUT = os.path.join(os.path.dirname(__file__), '../www/core')
 os.makedirs(OUT, exist_ok=True)
 s = open(READER, encoding='utf-8').read(); js = s[s.index('<script>\n'):]
 
@@ -22,7 +22,7 @@ HEAD = '// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v58.html �
 textutil = HEAD + '''// 文字工具：拼接、康熙部首、上标、分栏、句末判断、断行。全部是纯函数。
 var VENDOR=window.PDFYI_VENDOR||'vendor/';
 ''' + '\n'.join([line('var _TERM='), line('var _ABBR='), line('var _ROMAN='), line('var _CJKEND='), line('var _BREAK_TOK='), line('var _NO_START=')]) + '\n' + take(
-    '_kangxi', '_jn', '_jnAll', '_isZhPara', '_isPageNo', 'pageTextQuality', '_colOrder', 'extractParas', 'groupsToBboxes',
+    '_kangxi', '_jn', '_jnAll', '_isZhPara', '_isPageNo', 'pageTextQuality', '_bandGutter', '_colOrder', 'extractParas', 'groupsToBboxes',
     '_lines', '_normLine', '_headingLike', '_sentEnd', 'groupRaw', 'getMsgContent', 'getFinishReason', '_wrap') + '\n'
 open(OUT + '/textutil.js', 'w', encoding='utf-8').write(textutil)
 
