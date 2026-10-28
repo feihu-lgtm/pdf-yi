@@ -13,6 +13,10 @@ var LOG=[];
 window.addTransLog=function(page,input,output,model,type,ok){LOG.unshift({t:new Date().toLocaleTimeString(),page:page,type:type||'翻译',ok:ok!==false,msg:String(output||'').slice(0,300)});if(LOG.length>80)LOG.length=80;if(typeof renderStatus==='function')renderStatus()};
 window.toast=function(msg,kind){if(kind==='err')addTransLog('?','',msg,'magpie','提示',false)};
 window.setStatus=function(){};window.setProgress=function(){};
+// v54.1：引擎自己的经过也写进日志（状态窗口里能看到任务走到哪一步）
+function log(msg,ok){addTransLog('-','',msg,'magpie','引擎',ok!==false)}
+window.addEventListener('error',function(e){log('出错：'+(e.message||e),false)});
+window.addEventListener('unhandledrejection',function(e){log('出错：'+((e.reason&&e.reason.message)||e.reason),false)});
 
 // ── 设置（和全量版共用） ──
 function getConc(){var v=6;try{v=parseInt(localStorage.getItem('pdfyi_conc'))||6}catch(e){}return Math.max(6,Math.min(30,v))}
@@ -21,7 +25,7 @@ var notifyOn=true;try{notifyOn=localStorage.getItem('pdfyi_notify')!=='0'}catch(
 // ── 任务队列 ──
 var queue=[],job=null,paused=false,lastOut=null;
 var prog={pages:0,done:0,failPages:0,failParas:0,doneTimes:[],phase:'idle',doneUntil:0};
-function enqueue(j){if(!j||!j.path)return;if(queue.some(function(x){return x.path===j.path})||(job&&job.path===j.path))return;queue.push(j);tray();next()}
+function enqueue(j){if(!j||!j.path){log('收到的任务没有文件路径',false);return}log('加入队列：'+j.path+(j.key?'（来自 Zotero，'+j.mode+'）':''));if(queue.some(function(x){return x.path===j.path})||(job&&job.path===j.path))return;queue.push(j);tray();next()}
 function next(){if(job||!queue.length)return;job=queue.shift();run(job).catch(function(e){addTransLog('?','',String(e&&e.message||e),'magpie','任务',false);notify('这一本没翻成',baseOf(job.path)+'：'+(e&&e.message||e))}).finally(function(){job=null;prog.phase='idle';tray();Promise.resolve().then(next)})}// 不用计时器：看不见的窗口里计时器可能被冻结
 function baseOf(p){return p.slice(p.lastIndexOf('/')+1).replace(/\.pdf$/i,'')}
 function dirOf(p){var i=p.lastIndexOf('/');return i>=0?p.slice(0,i):'.'}
@@ -30,7 +34,7 @@ function dirOf(p){var i=p.lastIndexOf('/');return i>=0?p.slice(0,i):'.'}
 function resetBook(){pdfDoc=null;rawPdfBytes=null;totalPages=0;pageTextCache={};pageBboxCache={};memCache={};savedEnCache={};cachedAtLoad={};carryMark={};cleanRules=null;
   _rawCache={};_carryP={};_runningP=null;_runningEx={};_pageNotes={};highlights=[]}
 async function run(j){
-  resetBook();
+  resetBook();log('开始：'+j.path);
   var name=j.path.slice(j.path.lastIndexOf('/')+1);
   var bytes=await T.fs.readFile(j.path);
   cacheKey='pdftrans:'+name+':'+bytes.length;
@@ -155,13 +159,18 @@ function renderStatus(){var el=document.getElementById('st');if(!el)return;
     +'<ol>'+LOG.slice(0,30).map(function(e){return '<li class="'+(e.ok?'ok':'bad')+'">'+e.t+'　第 '+esc(e.page)+' 页　'+esc(e.type)+'　'+esc(e.msg)+'</li>'}).join('')+'</ol>'}
 
 // ── 接任务：Zotero 链接、菜单栏 ──
-function onDeepLink(u){try{var url=new URL(u);if(url.protocol!=='pdfyi:')return;var q=url.searchParams;
-  enqueue({path:q.get('path'),key:q.get('key'),lib:parseInt(q.get('lib'))||1,mode:q.get('mode')==='linked'?'linked':'stored'})}catch(e){}}
+function onDeepLink(u){try{var url=new URL(u);if(url.protocol!=='pdfyi:'){log('不认识的链接：'+u,false);return}var q=url.searchParams;
+  enqueue({path:q.get('path'),key:q.get('key'),lib:parseInt(q.get('lib'))||1,mode:q.get('mode')==='linked'?'linked':'stored'})}catch(e){log('链接解析失败：'+u+'：'+e,false)}}
+// v54.1：任务由 Rust 接收（Zotero 链接、菜单栏“后台翻译文件…”），这里去取。本地文件是“file:路径”
+async function drain(why){try{var js=await T.core.invoke('take_jobs');if(js&&js.length)log('取到 '+js.length+' 个任务（'+why+'）');
+  (js||[]).forEach(function(x){if(String(x).indexOf('file:')===0)enqueue({path:String(x).slice(5)});else onDeepLink(String(x))})}catch(e){log('取任务失败：'+e,false)}}
 if(T){
-  try{if(T.deepLink){T.deepLink.getCurrent().then(function(us){(us||[]).forEach(onDeepLink)}).catch(function(){});T.deepLink.onOpenUrl(function(us){(us||[]).forEach(onDeepLink)})}}catch(e){}
-  T.event.listen('tray-action',async function(ev){var id=String(ev.payload||'');
+  log('后台引擎启动：读文件 '+(!!(T.fs&&T.fs.readFile))+'，写文件 '+(!!(T.fs&&T.fs.writeFile))+'，事件 '+(!!T.event)+'，通知 '+(!!T.notification));
+  T.event.listen('pdfyi-job',function(){drain('收到通知')}).catch(function(e){log('监听任务通知失败：'+e,false)});
+  drain('启动时');
+  T.event.listen('tray-action',async function(ev){var id=String(ev.payload||'');log('菜单：'+id);
     if(id==='pause'){paused=!paused;if(!paused)resume();tray()}
-    else if(id==='bg_open'){try{var ps=await T.dialog.open({multiple:true,filters:[{name:'PDF',extensions:['pdf']}]});(Array.isArray(ps)?ps:(ps?[ps]:[])).forEach(function(p){enqueue({path:typeof p==='string'?p:p.path})})}catch(e){}}
+    // “后台翻译文件…”由 Rust 弹对话框，选好的文件走 take_jobs，这里不用管
     else if(id==='progress')T.core.invoke('show_main').catch(function(){});
     else if(id==='open_last'&&lastOut)T.core.invoke('open_path',{path:lastOut}).catch(function(){});
     else if(id==='reveal'&&lastOut)T.core.invoke('reveal_path',{path:lastOut}).catch(function(){});

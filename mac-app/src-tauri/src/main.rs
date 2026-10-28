@@ -7,7 +7,10 @@
 //   5. 打开文件、在访达中显示
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::Mutex;
 use std::time::Duration;
+use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_dialog::DialogExt;
 use tauri::{
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
@@ -27,6 +30,29 @@ fn mood_icon(mood: &str) -> &'static [u8] {
         "normal" => NORMAL,
         "inspired" => INSPIRED,
         _ => SLEEPING,
+    }
+}
+
+// v54.1：后台任务一律由这里接收（Zotero 的 pdfyi:// 链接、菜单栏“后台翻译文件…”选的文件），
+// 先放进待办列表，再通知后台引擎来取；后台引擎启动时也会取一次，所以通知没收到也不会丢。
+// 链接原样存；本地文件存成 “file:路径”。
+struct PendingJobs(Mutex<Vec<String>>);
+
+fn push_job(app: &AppHandle, job: String) {
+    if let Some(p) = app.try_state::<PendingJobs>() {
+        if let Ok(mut v) = p.0.lock() {
+            v.push(job);
+        }
+    }
+    let _ = app.emit_to("worker", "pdfyi-job", ());
+}
+
+// 后台引擎来取待办任务（取走就清空）
+#[tauri::command]
+fn take_jobs(state: tauri::State<PendingJobs>) -> Vec<String> {
+    match state.0.lock() {
+        Ok(mut v) => std::mem::take(&mut *v),
+        Err(_) => vec![],
     }
 }
 
@@ -159,12 +185,27 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             tray_update,
+            take_jobs,
             zotero_attach,
             open_path,
             reveal_path,
             show_main
         ])
         .setup(|app| {
+            app.manage(PendingJobs(Mutex::new(vec![])));
+            // Zotero 交来的链接：程序已经开着时走这里
+            let h = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for u in event.urls() {
+                    push_job(&h, u.to_string());
+                }
+            });
+            // 程序是被链接叫起来的：启动时就带着的链接
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                for u in urls {
+                    push_job(app.handle(), u.to_string());
+                }
+            }
             let idle = TrayState {
                 mood: "sleeping".into(), title: String::new(), book: String::new(), line: String::new(),
                 fail_line: String::new(), queue: vec![], paused: false, busy: false,
@@ -178,6 +219,22 @@ fn main() {
                 .menu(&menu)
                 .on_menu_event(|app, ev| match ev.id.as_ref() {
                     "show" => show_window(app),
+                    // 由这里弹对话框（不要让看不见的窗口去弹），选好的文件交给后台引擎
+                    "bg_open" => {
+                        let h = app.clone();
+                        app.dialog()
+                            .file()
+                            .add_filter("PDF", &["pdf"])
+                            .pick_files(move |files| {
+                                if let Some(fs) = files {
+                                    for f in fs {
+                                        if let Ok(p) = f.into_path() {
+                                            push_job(&h, format!("file:{}", p.to_string_lossy()));
+                                        }
+                                    }
+                                }
+                            });
+                    }
                     "worker_show" => {
                         if let Some(w) = app.get_webview_window("worker") {
                             let _ = w.show();
