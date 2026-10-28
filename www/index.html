@@ -1,6 +1,12 @@
 <!--
-  版本: v58
+  版本: v60
   更新日志:
+  v60 (本次：提取阶段的阅读顺序和分段，小宝用真实论文定位；v59 是后台面板):
+    - 修复：首页“关键词”窄栏和“摘要”宽栏被拼成了同一行（模型拿到之前就错了）。原因是分栏只找全页唯一一条分界线
+      （正文两栏在 297pt），而文章信息/摘要那一块的分界在 170pt 左右。现在按空白切块定阅读顺序（XY-cut）：
+      哪条空白带最宽就沿它切，竖向空白至少 8pt 且两边都有字时优先竖切；每一块用自己的分界线。整页切不出竖向空白时不变。
+    - 修复：模型合并段落时把一整栏合成一两段（真实第 6 页：两段各 4000 多字）。提取时记下每行起点的横坐标，
+      合并后再按版面细分：原文有空行处（上一行句末或下一行像标题）、首行缩进处、句末又明显偏短的末行之后，一定断开。
   v58 (本次：修串页；每段的框照搬原文):
     - 修复（小宝实测定位并给出修法）：按栏拆开的左右两张，原文被另一张的译文盖掉、或者多出另一栏的译文。
       同一页复制两份时，两份的内容列表可能就是同一个数组；以前只拆开了“通过引用指向的数组”，没拆开直接放着的数组，
@@ -2685,38 +2691,44 @@ function _isPageNo(x){return (/^[\d\s.\-–—\/:()（）|·,]{1,24}$/.test(x)&&
 function _normLine(x){return x.toLowerCase().replace(/[\d#]+/g,'').replace(/[^a-z\u00c0-\u024f\u4e00-\u9fff]+/g,' ').trim()}
 // 一页里非空的原始行：[{s:文字, i:在 rawLines 里的下标}]
 function _lines(r){var out=[];(r.rawLines||[]).forEach(function(x,i){var t=String(x||'').replace(/\s+/g,' ').trim();if(t)out.push({s:t,i:i})});return out}
-// 页眉页脚：每页前 3 行和后 3 行，去掉数字标点后，在 ≥3 页且 ≥1/4 的页里出现
+// 页眉页脚：除首尾 3 行外，同一实际顶端或底端基线被分栏阅读顺序拆进中间的行也要识别
+function _edgeWhere(r,i){
+  var ys=r.rawYs||[],y=ys[i],hi=-Infinity,lo=Infinity;
+  ys.forEach(function(v){if(v!=null&&isFinite(v)){if(v>hi)hi=v;if(v<lo)lo=v}});
+  if(y==null||!isFinite(y))return '';
+  return Math.abs(y-hi)<=3?'top':Math.abs(y-lo)<=3?'bottom':''
+}
 function detectRunningLines(){
   if(_runningP)return _runningP;
   _runningP=(async function(){
     var N=totalPages,cnt={};
     for(var a=1;a<=N;a+=8){var ps=[];for(var p=a;p<Math.min(N+1,a+8);p++)ps.push(rawOf(p));
-      (await Promise.all(ps)).forEach(function(r){var L=_lines(r),seen={};L.slice(0,3).concat(L.slice(-3)).forEach(function(x){var k=_normLine(x.s);if(k.length<3||seen[k])return;seen[k]=1;cnt[k]=(cnt[k]||0)+1;if(!_runningEx[k])_runningEx[k]=x.s})})}
+      (await Promise.all(ps)).forEach(function(r){var L=_lines(r),seen={};L.slice(0,3).concat(L.slice(-3)).concat(L.filter(function(x){return _edgeWhere(r,x.i)})).forEach(function(x){var k=_normLine(x.s);if(k.length<3||seen[k])return;seen[k]=1;cnt[k]=(cnt[k]||0)+1;if(!_runningEx[k])_runningEx[k]=x.s})})}
     var set={},th=Math.max(3,Math.ceil(N/4));
     if(N>=4)Object.keys(cnt).forEach(function(k){if(cnt[k]>=th)set[k]=cnt[k]});
     return set})();
   return _runningP}
 // 一条清理规则在第 pn 页、第 k 行（共 n 行）是否命中
-function _ruleHit(r,pn,k,n,str){
+function _ruleHit(r,pn,k,n,str,edge){
   if(!r||r.on===false)return false;
   if(r.pages==='odd'&&pn%2!==1)return false;
   if(r.pages==='even'&&pn%2!==0)return false;
   if(r.except&&r.except.indexOf(pn)>=0)return false;
-  var top=k<3,bot=k>=n-3;
+  var top=k<3||edge==='top',bot=k>=n-3||edge==='bottom';
   if(r.where==='top'&&!top)return false;
   if(r.where==='bottom'&&!bot)return false;
   if(!top&&!bot)return false;
   return _normLine(str)===r.key}
-// 这一行是不是页眉页脚或页码（只看前 3 行和后 3 行）
-function isRunningLine(pn,k,n,str,autoSet){
-  if(k>=3&&k<n-3)return false;
+// 这一行是不是页眉页脚或页码
+function isRunningLine(pn,k,n,str,autoSet,edge){
+  if(k>=3&&k<n-3&&!edge)return false;
   if(_isPageNo(str))return true;
-  if(cleanRules)return cleanRules.running.some(function(r){return _ruleHit(r,pn,k,n,str)});
+  if(cleanRules)return cleanRules.running.some(function(r){return _ruleHit(r,pn,k,n,str,edge)});
   var key=_normLine(str);return !!(autoSet&&key.length>=3&&autoSet[key])}
-// 正文行：去掉前 3 行和后 3 行里的页眉页脚和页码。规则确认过就按规则，没有就按自动识别
+// 正文行：去掉页眉页脚和页码。规则确认过就按规则，没有就按自动识别
 async function bodyLines(pn){
   var r=await rawOf(pn),set=cleanRules?null:await detectRunningLines(),L=_lines(r),n=L.length;
-  return _dropFootnotes(r,L.filter(function(x,k){return !isRunningLine(pn,k,n,x.s,set)}))}
+  return _dropFootnotes(r,L.filter(function(x,k){return !isRunningLine(pn,k,n,x.s,set,_edgeWhere(r,x.i))}))}
 // v41：页面底部的脚注区（字号比正文小、第一行以数字或符号开头的一组连续行）不算正文
 function _dropFootnotes(r,arr){
   var fs=r.rawFs,bf=r.bodyFs;if(!fs||!bf||arr.length<3)return arr;
@@ -2776,7 +2788,8 @@ async function prepOf(p){
   if(tail){var lp=lines[tail.lastIdx]||'';lines[tail.lastIdx]=(/-$/.test(lp)&&/^[a-z]/.test(tail.text))?lp.replace(/-$/,'')+tail.text:_jn(lp,tail.text).trim();carryMark[p]=tail.text}
   else carryMark[p]='';
   // 译文里隐藏页眉页脚和页码
-  if(cleanRules&&cleanRules.hide){var L=_lines(r),n=L.length;L.forEach(function(x,k){if(isRunningLine(p,k,n,x.s,null))lines[x.i]=''})}
+  if(cleanRules&&cleanRules.hide){var L=_lines(r),n=L.length;L.forEach(function(x,k){if(isRunningLine(p,k,n,x.s,null,_edgeWhere(r,x.i)))lines[x.i]=''})}
+  lines._xs=(r.rawXs||[]).slice();lines._ys=ys;lines._orig=r.rawLines||[];// v59：行起点横坐标、原文空行位置，合并后细分段落用
   return {rawLines:lines,rawYs:ys}}
 // 按空行分组成段（AI 合并失败时用）
 function groupRaw(lines,ys){
@@ -2862,11 +2875,11 @@ async function scanBookStructure(opt){
 // 核对清理规则：AI 给的和自动识别的放在一起，按同一个关键字只判一次，用同一个标准
 async function validateCleanRules(c,autoList){
   var N=totalPages,ok=[],bad=[],all=[];
-  for(var p=1;p<=N;p++)all.push(_lines(await rawOf(p)));
+  for(var p=1;p<=N;p++)all.push(await rawOf(p));
   function stats(r){var mid=0,hit=0,app=0;
-    all.forEach(function(L,idx){var pn=idx+1,n=L.length,h=false;
+    all.forEach(function(raw,idx){var L=_lines(raw),pn=idx+1,n=L.length,h=false;
       if(!(r.pages==='odd'&&pn%2!==1)&&!(r.pages==='even'&&pn%2!==0))app++;
-      L.forEach(function(l,k){if(_normLine(l.s)!==r.key)return;if(k>=3&&k<n-3){if(r.except.indexOf(pn)<0)mid++;return}if(_ruleHit(r,pn,k,n,l.s))h=true});
+      L.forEach(function(l,k){if(_normLine(l.s)!==r.key)return;var edge=_edgeWhere(raw,l.i);if(k>=3&&k<n-3&&!edge){if(r.except.indexOf(pn)<0)mid++;return}if(_ruleHit(r,pn,k,n,l.s,edge))h=true});
       if(h)hit++});
     return {mid:mid,hit:hit,app:app}}
   function judge(r){var st=stats(r),need=Math.max(2,Math.ceil(st.app*0.3));
@@ -3011,7 +3024,7 @@ var showRunning=false;try{showRunning=localStorage.getItem('pdfyi_show_running')
 async function hiddenLinesOf(p){
   if(!pdfDoc||window._realPageOrder||!cleanRules||!cleanRules.hide)return null;
   var r=await rawOf(p),L=_lines(r),n=L.length,top=[],bottom=[];
-  L.forEach(function(x,k){if(isRunningLine(p,k,n,x.s,null))(k<3?top:bottom).push(x.s)});
+  L.forEach(function(x,k){var edge=_edgeWhere(r,x.i);if(isRunningLine(p,k,n,x.s,null,edge))(edge==='bottom'||(k>=n-3&&!edge)?bottom:top).push(x.s)});
   return (top.length||bottom.length)?{top:top,bottom:bottom}:null}
 function decorateRunning(p){
   var targets=[$('zh-page-'+p),$('tv-block-'+p)];
@@ -3716,18 +3729,29 @@ function pageTextQuality(lines){
   if(ns===0)return {kind:'empty',msg:'这一页提取不到正文文字（一个字都没有，或者只读出了页码）：可能是扫描件、整页图片、空白页，或者字体缺少字符映射。'};
   if(ns>=15&&letters/ns<0.35)return {kind:'garbled',msg:'这一页的字读不出来，只剩标点和数字：可能是扫描件，或者字体缺少字符映射。'};
   return null}
-// v60：横跨分界线的连续带区里，找一条所有行都不压的最宽竖缝
-function _bandGutter(lines,x0,x1,fsOf){
-  var iv=[];lines.forEach(function(L){L.forEach(function(it){iv.push([x0(it),x1(it)])})});
-  iv.sort(function(a,b){return a[0]-b[0]});
-  var fs=Math.max.apply(null,lines.map(fsOf)),best=null,end=-Infinity;
-  for(var i=0;i<iv.length;i++){
-    if(end>-Infinity&&iv[i][0]-end>=fs&&(!best||iv[i][0]-end>best.w))best={x:(iv[i][0]+end)/2,w:iv[i][0]-end};
-    if(iv[i][1]>end)end=iv[i][1]}
-  if(!best)return null;
-  var nl=0,nr=0;lines.forEach(function(L){if(L.some(function(it){return x1(it)<=best.x}))nl++;if(L.some(function(it){return x0(it)>=best.x}))nr++});
-  return nl>=2&&nr>=2?best.x:null}
 // v40：双栏排版先分栏。找一条竖缝：左右两边都有字的行里，至少 60% 在缝上留空
+// v59：按空白切块定阅读顺序（XY-cut）。哪条空白带最宽就沿它切：竖向空白 ≥8pt 且两边都有字时优先竖切（先左后右），
+// 否则横切（先上后下）；切不动的块内按行从上到下、从左到右。返回 {items, vertical:是否用过竖切}；每个片段标上块号 _blk
+function _xyOrder(its){
+  var B=its.map(function(it){var t=it.transform,fs=Math.hypot(t[0],t[1])||Math.abs(t[3])||8;return {it:it,x0:t[4],x1:t[4]+(it.width||0),y0:t[5]-fs*0.2,y1:t[5]+fs*0.8,y:t[5]}});
+  var used=false,out=[],blk=0;
+  var gap=function(arr,a,b){var iv=arr.map(function(o){return [o[a],o[b]]}).sort(function(p,q){return p[0]-q[0]});var best={size:0,at:null},end=iv.length?iv[0][1]:0;
+    for(var i=1;i<iv.length;i++){if(iv[i][0]>end){var g=iv[i][0]-end;if(g>best.size)best={size:g,at:(iv[i][0]+end)/2}}end=Math.max(end,iv[i][1])}return best};
+  // 同一行的容差按“这一行已有的字和新字里较大的字号”的 0.55 倍算（上标比正文高 4–5pt，仍算同一行）
+  var leaf=function(arr){arr.sort(function(p,q){return q.y-p.y});var rows=[],row=null;
+    arr.forEach(function(o){var f=o.y1-o.y0;if(!row||row.y-o.y>Math.max(1.5,Math.max(row.fs,f)*0.55)){row={y:o.y,fs:f,a:[]};rows.push(row)}else row.fs=Math.max(row.fs,f);row.a.push(o)});
+    blk++;rows.forEach(function(r){r.a.sort(function(p,q){return p.x0-q.x0});r.a.forEach(function(o){o.it._blk=blk;out.push(o.it)})})};
+  var cut=function(arr,depth){
+    if(arr.length<2||depth>60){leaf(arr);return}
+    var v=gap(arr,'x0','x1'),h=gap(arr,'y0','y1');
+    var oneLine=Math.max.apply(null,arr.map(function(o){return o.y}))-Math.min.apply(null,arr.map(function(o){return o.y}))<3;// 只剩一行时，行内空隙要 ≥15pt 才切
+    if(v.size>=(oneLine?15:8)){var L=arr.filter(function(o){return (o.x0+o.x1)/2<v.at}),R=arr.filter(function(o){return (o.x0+o.x1)/2>=v.at});
+      if(L.length&&R.length){used=true;cut(L,depth+1);cut(R,depth+1);return}}
+    if(h.size>0.5){var T=arr.filter(function(o){return (o.y0+o.y1)/2>h.at}),D=arr.filter(function(o){return (o.y0+o.y1)/2<=h.at});
+      if(T.length&&D.length){cut(T,depth+1);cut(D,depth+1);return}}
+    leaf(arr)};
+  cut(B,0);
+  return {items:out,vertical:used}}
 function _colOrder(items,W){
   var its=items.filter(function(it){return it&&it.str&&it.str.trim()});
   _colOrder.info=null;
@@ -3740,51 +3764,27 @@ function _colOrder(items,W){
     lines.forEach(function(L){var hasL=L.some(function(it){return x1(it)<=sx-4}),hasR=L.some(function(it){return x0(it)>=sx+4}),cov=L.some(function(it){return x0(it)<sx+4&&x1(it)>sx-4});
       if(hasL&&hasR){both++;if(!cov)free++}});
     if(!best||free>best.free)best={sx:sx,free:free,both:both}}
-  if(!best||best.both<5||best.free<5||best.free<best.both*0.6)return items;
+  var _xo=_xyOrder(its);
+  if(!best||best.both<5||best.free<5||best.free<best.both*0.6)return _xo.vertical?_xo.items:items;
   var sx=best.sx,ys=function(L){return L[0].transform[5]};
   lines.sort(function(a,b){return ys(b)-ys(a)});
-  lines.forEach(function(L){L.sort(function(a,b){return x0(a)-x0(b)})});
-  var isFull=function(L){return L.some(function(it){return x0(it)<sx-4&&x1(it)>sx+4})};
   // v55：记下分界线，以及页面中间（去掉上下各 8%）横跨两栏的行数，按栏对照时要用
   var yTop=ys(lines[0]),yBot=ys(lines[lines.length-1]),span=Math.max(1,yTop-yBot),fullMid=0;
-  lines.forEach(function(L){var y=ys(L);if(y<yTop-span*0.08&&y>yBot+span*0.08&&isFull(L))fullMid++});
+  lines.forEach(function(L){var y=ys(L);if(y<yTop-span*0.08&&y>yBot+span*0.08&&L.some(function(it){return x0(it)<sx-4&&x1(it)>sx+4}))fullMid++});
   _colOrder.info={sx:sx,fullMid:fullMid};
-  var fsOf=function(L){return Math.max.apply(null,L.map(function(it){var t=it.transform;return Math.hypot(t[0],t[1])||Math.abs(t[3])||0}))||10};
-  // v60：最上和最下一行（页眉、页脚）离正文明显远时整行保留，不拆进左右栏，否则右栏页眉会混进右栏正文中间
-  var gaps=[];for(var i=1;i<lines.length;i++)gaps.push(ys(lines[i-1])-ys(lines[i]));
-  var gs=gaps.slice().sort(function(a,b){return a-b}),gMed=gs.length?gs[Math.floor(gs.length/2)]:0;
-  var whole={};
-  if(lines.length>2&&gaps[0]>gMed*1.5)whole[0]=1;
-  if(lines.length>2&&gaps[gaps.length-1]>gMed*1.5)whole[lines.length-1]=1;
-  // v60：横跨分界线的连续几行里，如果有一条所有行都不压的最宽竖缝（比如左边关键词、右边摘要），按这条缝再分左右
-  var band={};
-  for(var a=0;a<lines.length;a++){
-    if(whole[a]||!isFull(lines[a]))continue;
-    var b=a;for(var k=a+1;k<lines.length&&!whole[k]&&ys(lines[b])-ys(lines[k])<=fsOf(lines[b])*3;k++)if(isFull(lines[k]))b=k;
-    var fulls=0;for(k=a;k<=b;k++)if(isFull(lines[k]))fulls++;
-    if(fulls<2){a=b;continue}
-    var cut=_bandGutter(lines.slice(a,b+1),x0,x1,fsOf);
-    if(cut===null){a=b;continue}
-    var crosses=function(L){return L.some(function(it){return x0(it)<cut&&x1(it)>cut})};
-    var s=a,e=b;
-    if(s>0&&!whole[s-1]&&!band[s-1]&&ys(lines[s-1])-ys(lines[s])<=fsOf(lines[s-1])*3&&!crosses(lines[s-1]))s--;
-    if(e<lines.length-1&&!whole[e+1]&&ys(lines[e])-ys(lines[e+1])<=fsOf(lines[e])*3&&!crosses(lines[e+1]))e++;
-    for(k=s;k<=e;k++)band[k]={s:s,e:e,cut:cut};
-    a=e}
+  if(_xo.vertical)return _xo.items;// v59：阅读顺序用按空白切块的结果
   var out=[],blockL=[],blockR=[];
   var flush=function(){blockL.forEach(function(L){out.push.apply(out,L)});blockR.forEach(function(L){out.push.apply(out,L)});blockL=[];blockR=[]};
-  for(var i=0;i<lines.length;i++){var L=lines[i];
-    if(band[i]){var bd=band[i],bl=[],br=[];flush();
-      for(var k=bd.s;k<=bd.e;k++)lines[k].forEach(function(it){((x0(it)+x1(it))/2<bd.cut?bl:br).push(it)});
-      out.push.apply(out,bl);out.push.apply(out,br);i=bd.e;continue}
-    if(whole[i]||isFull(L)){flush();out.push.apply(out,L);continue}
+  lines.forEach(function(L){
+    L.sort(function(a,b){return x0(a)-x0(b)});
+    var full=L.some(function(it){return x0(it)<sx-4&&x1(it)>sx+4});
+    if(full){flush();out.push.apply(out,L);return}
     var l=L.filter(function(it){return (x0(it)+x1(it))/2<sx}),r=L.filter(function(it){return (x0(it)+x1(it))/2>=sx});
-    if(l.length)blockL.push(l);if(r.length)blockR.push(r)}
+    if(l.length)blockL.push(l);if(r.length)blockR.push(r)});
   flush();
   return out}
-
 function extractParas(tc,viewport){
-  var pdfH=viewport.height,pdfW=viewport.width;var lines=[],prevY=null,prevYRaw=null,cur='',curItems=[];
+  var pdfH=viewport.height,pdfW=viewport.width;var lines=[],prevY=null,prevYRaw=null,cur='',curItems=[],prevBlk;
   var _items=_colOrder(tc.items,pdfW);// v40：双栏先分栏
   // v41：正文字号 = 全页字数最多的那个字号；用来认上标脚注号和脚注区
   var _fsOf=function(it){var t=it.transform;return Math.hypot(t[0],t[1])||Math.abs(t[3])||0};
@@ -3802,45 +3802,32 @@ function extractParas(tc,viewport){
     if(cur&&prevY!==null&&bodyFs&&/^(\d{1,3}|[*†‡§¶])$/.test(_supTxt)&&((ifs<bodyFs*0.8&&rise>=1&&rise<=8)||(ifs<=bodyFs*1.02&&rise>=bodyFs*0.25&&rise<=bodyFs*0.6))){
       st=_supTxt;
       cur=cur.replace(/\s+$/,'')+st.replace(/\d/g,function(d){return _SUP[d]});curItems.push(Object.assign({},item,{_sup:true}));continue}
-    if(prevY!==null&&Math.abs(y-prevY)>5){if(cur.trim())lines.push({str:_supTidy(cur.trim()),y:prevY,items:curItems.slice(),fs:_lineFs(curItems)});cur=item.str;curItems=[item]}
+    var _nb=(prevBlk!==undefined&&item._blk!==undefined&&item._blk!==prevBlk);prevBlk=item._blk;// v59：换了块就换行
+    if(prevY!==null&&(Math.abs(y-prevY)>5||_nb)){if(cur.trim())lines.push({str:_supTidy(cur.trim()),y:prevY,items:curItems.slice(),fs:_lineFs(curItems)});cur=item.str;curItems=[item]}
     else{cur=_jn(cur,item.str);curItems.push(item)}prevY=y;if(st)prevYRaw=yRaw}
   if(cur.trim())lines.push({str:_supTidy(cur.trim()),y:prevY,items:curItems,fs:_lineFs(curItems)});
   // ── 规则预合并：行间距异常大（段落空白行）才强制断段，其余全部暂时合入同一组 ──
   // 真正的段落边界由 aiMergeLines 决定；这里只做行→初步分组
-  // v60：版面断段。AI 合并失败时只剩这里的分组；双栏正文段间没有空行，要靠首行缩进、段末短行、编号标题来断
-  var _info=_colOrder.info,_mode=function(a){var c={},b=null;a.forEach(function(v){c[v]=(c[v]||0)+1;if(b===null||c[v]>c[b])b=v});return b===null||c[b]<3?null:+b};
-  lines.forEach(function(ln){var its=ln.items.filter(function(it){return it.str&&it.str.trim()&&!it._sup});if(!its.length)its=ln.items;
-    ln.lx=Math.min.apply(null,its.map(function(it){return it.transform[4]}));ln.rx=Math.max.apply(null,its.map(function(it){return it.transform[4]+(it.width||0)}));
-    ln.col=!_info?'A':ln.rx<=_info.sx+4?'L':ln.lx>=_info.sx-4?'R':'F'});
-  var _edge={};['A','L','R','F'].forEach(function(c){var ls=lines.filter(function(l){return l.col===c});_edge[c]={l:_mode(ls.map(function(l){return Math.round(l.lx)})),r:_mode(ls.map(function(l){return Math.round(l.rx)}))}});
-  var _flushL=function(l){var e=_edge[l.col].l;return e!==null&&Math.abs(l.lx-e)<(l.fs||bodyFs||10)*0.6};
-  var _layoutBreak=function(prev,ln,next){
-    if(!prev||prev.col!==ln.col||ln.y>=prev.y||!_TERM.test(prev.str))return false;
-    var fs=ln.fs||bodyFs||10,e=_edge[ln.col];
-    if(/^\d+(\.\d+)*\.?\s+[A-Z\u4e00-\u9fff]/.test(ln.str))return true;// 编号标题或编号条目
-    if(e.r!==null&&prev.rx<e.r-fs*3)return true;// 上一行明显没写满：段末
-    var ind=e.l===null?0:ln.lx-e.l;
-    return ind>=fs*0.6&&ind<=fs*3.5&&_flushL(prev)&&(!next||next.col!==ln.col||_flushL(next))};// 首行缩进；排除参考文献的悬挂缩进
   var paras=[],paraLines=[];
   for(var i=0;i<lines.length;i++){
     var ln=lines[i];if(!ln.str){if(paraLines.length){paras.push(paraLines.slice());paraLines=[]}continue}
     // 行间距超过字高1.8倍视为段落空行
     if(paraLines.length&&i>0){
       var gap=Math.abs(ln.y-lines[i-1].y);var approxLineH=14;
-      if(gap>approxLineH*1.8||_layoutBreak(lines[i-1],ln,lines[i+1])){paras.push(paraLines.slice());paraLines=[ln];continue}}
+      if(gap>approxLineH*1.8){paras.push(paraLines.slice());paraLines=[ln];continue}}
     paraLines.push(ln)}
-
-  var texts=[],bboxes=[],rawLines=[],rawYs=[],rawFs=[];
+  if(paraLines.length)paras.push(paraLines);
+  var texts=[],bboxes=[],rawLines=[],rawYs=[],rawFs=[],rawXs=[];
   paras.forEach(function(pls){
     // 把每个初步分组里的行逐行记录，供AI合并
-    pls.forEach(function(l){rawLines.push(l.str);rawYs.push(l.y);rawFs.push(l.fs||0)});
-    rawLines.push('');rawYs.push(null);rawFs.push(null);// 空字符串作为组间分隔符
+    pls.forEach(function(l){rawLines.push(l.str);rawYs.push(l.y);rawFs.push(l.fs||0);rawXs.push(l.items&&l.items.length?Math.min.apply(null,l.items.filter(function(it){return !it._sup}).map(function(it){return it.transform[4]}).concat([Infinity])):null)});
+    rawLines.push('');rawYs.push(null);rawFs.push(null);rawXs.push(null);// 空字符串作为组间分隔符
   });
   // 同时保留一份 fallback 的传统合并结果
   paras.forEach(function(pls){var t=_jnAll(pls.map(function(l){return l.str})).replace(/\s+/g,' ').trim();if(t.length<=2)return;
     var minY=Infinity,maxY=-Infinity;pls.forEach(function(l){if(l.y<minY)minY=l.y;if(l.y>maxY)maxY=l.y});
     texts.push(t);bboxes.push({y:minY,h:maxY-minY+14})});
-  return{texts:texts,bboxes:bboxes,pdfH:pdfH,pdfW:pdfW,rawLines:rawLines,rawYs:rawYs,rawFs:rawFs,bodyFs:bodyFs}}
+  return{texts:texts,bboxes:bboxes,pdfH:pdfH,pdfW:pdfW,rawLines:rawLines,rawYs:rawYs,rawFs:rawFs,rawXs:rawXs,bodyFs:bodyFs}}
 // v33：按 AI 合并后的分组（rawLines 下标）重算每段 bbox
 function groupsToBboxes(groups,ys){
   if(!groups||!ys)return [];
@@ -3848,6 +3835,36 @@ function groupsToBboxes(groups,ys){
     return isFinite(mn)?{y:mn,h:mx-mn+14,y0:y0}:{y:0,h:14}})}// v57：y0 是这一段第一行的高度
 
 // ══ AI 段落合并 ══
+// v59：模型合并段落后，按版面信号再断开（不依赖模型）：
+// ① 原文两行之间本来有空行，且上一行句末或下一行像标题；② 上一行句末、下一行起点比上一行往右 ≥5pt（首行缩进）；
+// ③ 上一行句末、明显比同段其他行短、下一行大写开头（段落末行）；④ 两行间距超过同段一般行距 1.35 倍（标题、引文块前后）；
+// ⑤ 上一行明显偏短、下一行首行缩进（标题后面接正文）
+function _refineGroups(idxGroups,rawLines){
+  var xs=rawLines._xs||[],ys=rawLines._ys||[],orig=rawLines._orig||rawLines;
+  var END=/[.!?。！？:：…]["”’)\]）」』》]*(\d{0,3}|[⁰¹²³⁴⁵⁶⁷⁸⁹*†‡]{0,3})$/,UP=/^["“‘(\[]?[A-Z0-9]/;
+  var leftOf=function(i){var x=xs[i];if(x==null||!isFinite(x))return null;var m=x;
+    for(var d=-4;d<=4;d++){var j=i+d,xj=xs[j];if(d===0||xj==null||!isFinite(xj)||!String(rawLines[j]||'').trim())continue;if(Math.abs(xj-x)<30)m=Math.min(m,xj)}return m};
+  var out=[];
+  idxGroups.forEach(function(g){
+    if(g.length<2){out.push(g);return}
+    var lens=g.map(function(i){return String(rawLines[i]||'').length}).sort(function(a,b){return a-b}),med=lens[Math.floor(lens.length/2)];
+    var sp=[];for(var k0=1;k0<g.length;k0++){var ya=ys[g[k0-1]],yb=ys[g[k0]];if(ya!=null&&yb!=null&&ya>yb)sp.push(ya-yb)}sp.sort(function(a,b){return a-b});var typ=sp.length?sp[Math.floor(sp.length/2)]:0;
+    var cur=[g[0]];
+    for(var k=1;k<g.length;k++){
+      var a=g[k-1],b=g[k],ta=String(rawLines[a]||'').trim(),tb=String(rawLines[b]||'').trim(),end=END.test(ta),brk=false;
+      // ① 原文本来有空行
+      if(b>a+1){for(var q=a+1;q<b;q++){if(orig[q]===''&&(end||tb.length<60)){brk=true;break}}}
+      // ② 首行缩进
+      if(!brk&&end&&xs[a]!=null&&xs[b]!=null&&isFinite(xs[a])&&isFinite(xs[b])&&xs[b]-xs[a]>=5&&xs[b]-xs[a]<40)brk=true;// 和上一行比（引文块整块缩进不算）
+      // ③ 段落末行偏短
+      if(!brk&&end&&med>=30&&ta.length<med*0.7&&UP.test(tb))brk=true;
+      // ④ 行距明显变大（真实论文：正常行距 10–11pt，引文块和标题前后 15pt）
+      if(!brk&&typ>0&&ys[a]!=null&&ys[b]!=null&&ys[a]>ys[b]&&ys[a]-ys[b]>typ*1.35)brk=true;
+      // ⑤ 短行后面跟缩进行
+      if(!brk&&med>=30&&ta.length<med*0.6&&xs[a]!=null&&xs[b]!=null&&isFinite(xs[a])&&isFinite(xs[b])&&xs[b]-xs[a]>=5&&xs[b]-xs[a]<40)brk=true;
+      if(brk){out.push(cur);cur=[b]}else cur.push(b)}
+    out.push(cur)});
+  return out}
 async function aiMergeLines(rawLines,apiKey){
   // 过滤掉纯空行，编号，送AI
   var numbered=[];var lineMap=[];
@@ -3883,16 +3900,25 @@ async function aiMergeLines(rawLines,apiKey){
     // v33：校验覆盖——任何一行没被分进组，整页回退规则分段，避免静默丢句
     var covered={};groups.forEach(function(g){if(Array.isArray(g))g.forEach(function(n){n=parseInt(n);if(n>=1&&n<=numbered.length)covered[n]=1})});
     if(Object.keys(covered).length<numbered.length)throw new Error('合并结果遗漏 '+(numbered.length-Object.keys(covered).length)+' 行');
-    var result=[],idxGroups=[];
+    var result=[],idxGroups=[],rawG=[];
     groups.forEach(function(g){
       if(!Array.isArray(g)||g.length===0)return;
       var idxs=g.map(function(n){return lineMap[parseInt(n)-1]}).filter(function(x){return x!==undefined});
+      if(idxs.length)rawG.push(idxs)});
+    // v59：按版面信号再断开
+    _refineGroups(rawG,rawLines).forEach(function(idxs){
       var parts=idxs.map(function(i){return rawLines[i]||''}).filter(Boolean);
       var merged=_jnAll(parts).replace(/\s+/g,' ').trim();
       if(merged.length>2){result.push(merged);idxGroups.push(idxs)}});
     result._idx=idxGroups;
     return result.length>0?result:null;// null → fallback到规则结果
-  }catch(e){console.warn('aiMergeLines failed:',e.message);try{addTransLog('?','','合并失败：'+(e.message||e)+'，改用版面分段',activeModel,'合并',false)}catch(_){}return null}}
+  }catch(e){console.warn('aiMergeLines failed:',e.message);try{addTransLog('?','','合并失败：'+(e.message||e)+'，改用版面分段',activeModel,'合并',false)}catch(_){}
+    var fallback=[],idxFallback=[];
+    _refineGroups([lineMap],rawLines).forEach(function(idxs){
+      var merged=_jnAll(idxs.map(function(i){return rawLines[i]||''}).filter(Boolean)).replace(/\s+/g,' ').trim();
+      if(merged.length>2){fallback.push(merged);idxFallback.push(idxs)}});
+    fallback._idx=idxFallback;
+    return fallback.length?fallback:null}}
 
 // ══ Visible-First Translation Engine ══
 var transQueue=new Set(),transDone=0,transTotal=0,CONC=6,transActive=0,transRunning=false;

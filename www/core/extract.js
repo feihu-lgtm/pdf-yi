@@ -1,4 +1,4 @@
-// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v58.html 原样移植生成，逻辑与全量版一致。
+// 本文件由 coreport/assemble.py 从全量版 pdf-reader-v60.html 原样移植生成，逻辑与全量版一致。
 // 提取：每页的原始行（pdf.js）、页眉页脚识别、脚注区、跨页补句。
 // 下面这些是“当前这本书”的状态，后台引擎每开一本书就重置一次（见 worker.js 的 resetBook）。
 var pdfDoc=null,rawPdfBytes=null,totalPages=0,cacheKey='';
@@ -8,34 +8,40 @@ function rawOf(pn){
   if(!_rawCache[pn])_rawCache[pn]=pdfDoc.getPage(pn).then(function(pg){return pg.getTextContent().then(function(tc){return extractParas(tc,pg.getViewport({scale:1}))})})
     .catch(function(e){addTransLog(pn,'','提取失败: '+(e.message||e),activeModel,'提取',false);return {texts:[],bboxes:[],rawLines:[],rawYs:[],pdfH:800,pdfW:600}});
   return _rawCache[pn]}
+function _edgeWhere(r,i){
+  var ys=r.rawYs||[],y=ys[i],hi=-Infinity,lo=Infinity;
+  ys.forEach(function(v){if(v!=null&&isFinite(v)){if(v>hi)hi=v;if(v<lo)lo=v}});
+  if(y==null||!isFinite(y))return '';
+  return Math.abs(y-hi)<=3?'top':Math.abs(y-lo)<=3?'bottom':''
+}
 function detectRunningLines(){
   if(_runningP)return _runningP;
   _runningP=(async function(){
     var N=totalPages,cnt={};
     for(var a=1;a<=N;a+=8){var ps=[];for(var p=a;p<Math.min(N+1,a+8);p++)ps.push(rawOf(p));
-      (await Promise.all(ps)).forEach(function(r){var L=_lines(r),seen={};L.slice(0,3).concat(L.slice(-3)).forEach(function(x){var k=_normLine(x.s);if(k.length<3||seen[k])return;seen[k]=1;cnt[k]=(cnt[k]||0)+1;if(!_runningEx[k])_runningEx[k]=x.s})})}
+      (await Promise.all(ps)).forEach(function(r){var L=_lines(r),seen={};L.slice(0,3).concat(L.slice(-3)).concat(L.filter(function(x){return _edgeWhere(r,x.i)})).forEach(function(x){var k=_normLine(x.s);if(k.length<3||seen[k])return;seen[k]=1;cnt[k]=(cnt[k]||0)+1;if(!_runningEx[k])_runningEx[k]=x.s})})}
     var set={},th=Math.max(3,Math.ceil(N/4));
     if(N>=4)Object.keys(cnt).forEach(function(k){if(cnt[k]>=th)set[k]=cnt[k]});
     return set})();
   return _runningP}
-function _ruleHit(r,pn,k,n,str){
+function _ruleHit(r,pn,k,n,str,edge){
   if(!r||r.on===false)return false;
   if(r.pages==='odd'&&pn%2!==1)return false;
   if(r.pages==='even'&&pn%2!==0)return false;
   if(r.except&&r.except.indexOf(pn)>=0)return false;
-  var top=k<3,bot=k>=n-3;
+  var top=k<3||edge==='top',bot=k>=n-3||edge==='bottom';
   if(r.where==='top'&&!top)return false;
   if(r.where==='bottom'&&!bot)return false;
   if(!top&&!bot)return false;
   return _normLine(str)===r.key}
-function isRunningLine(pn,k,n,str,autoSet){
-  if(k>=3&&k<n-3)return false;
+function isRunningLine(pn,k,n,str,autoSet,edge){
+  if(k>=3&&k<n-3&&!edge)return false;
   if(_isPageNo(str))return true;
-  if(cleanRules)return cleanRules.running.some(function(r){return _ruleHit(r,pn,k,n,str)});
+  if(cleanRules)return cleanRules.running.some(function(r){return _ruleHit(r,pn,k,n,str,edge)});
   var key=_normLine(str);return !!(autoSet&&key.length>=3&&autoSet[key])}
 async function bodyLines(pn){
   var r=await rawOf(pn),set=cleanRules?null:await detectRunningLines(),L=_lines(r),n=L.length;
-  return _dropFootnotes(r,L.filter(function(x,k){return !isRunningLine(pn,k,n,x.s,set)}))}
+  return _dropFootnotes(r,L.filter(function(x,k){return !isRunningLine(pn,k,n,x.s,set,_edgeWhere(r,x.i))}))}
 function _dropFootnotes(r,arr){
   var fs=r.rawFs,bf=r.bodyFs;if(!fs||!bf||arr.length<3)return arr;
   var k=arr.length;while(k>0){var f=fs[arr[k-1].i];if(f&&f<bf*0.92)k--;else break}
@@ -78,15 +84,16 @@ async function prepOf(p){
   if(tail){var lp=lines[tail.lastIdx]||'';lines[tail.lastIdx]=(/-$/.test(lp)&&/^[a-z]/.test(tail.text))?lp.replace(/-$/,'')+tail.text:_jn(lp,tail.text).trim();carryMark[p]=tail.text}
   else carryMark[p]='';
   // 译文里隐藏页眉页脚和页码
-  if(cleanRules&&cleanRules.hide){var L=_lines(r),n=L.length;L.forEach(function(x,k){if(isRunningLine(p,k,n,x.s,null))lines[x.i]=''})}
+  if(cleanRules&&cleanRules.hide){var L=_lines(r),n=L.length;L.forEach(function(x,k){if(isRunningLine(p,k,n,x.s,null,_edgeWhere(r,x.i)))lines[x.i]=''})}
+  lines._xs=(r.rawXs||[]).slice();lines._ys=ys;lines._orig=r.rawLines||[];// v59：行起点横坐标、原文空行位置，合并后细分段落用
   return {rawLines:lines,rawYs:ys}}
 async function validateCleanRules(c,autoList){
   var N=totalPages,ok=[],bad=[],all=[];
-  for(var p=1;p<=N;p++)all.push(_lines(await rawOf(p)));
+  for(var p=1;p<=N;p++)all.push(await rawOf(p));
   function stats(r){var mid=0,hit=0,app=0;
-    all.forEach(function(L,idx){var pn=idx+1,n=L.length,h=false;
+    all.forEach(function(raw,idx){var L=_lines(raw),pn=idx+1,n=L.length,h=false;
       if(!(r.pages==='odd'&&pn%2!==1)&&!(r.pages==='even'&&pn%2!==0))app++;
-      L.forEach(function(l,k){if(_normLine(l.s)!==r.key)return;if(k>=3&&k<n-3){if(r.except.indexOf(pn)<0)mid++;return}if(_ruleHit(r,pn,k,n,l.s))h=true});
+      L.forEach(function(l,k){if(_normLine(l.s)!==r.key)return;var edge=_edgeWhere(raw,l.i);if(k>=3&&k<n-3&&!edge){if(r.except.indexOf(pn)<0)mid++;return}if(_ruleHit(r,pn,k,n,l.s,edge))h=true});
       if(h)hit++});
     return {mid:mid,hit:hit,app:app}}
   function judge(r){var st=stats(r),need=Math.max(2,Math.ceil(st.app*0.3));
