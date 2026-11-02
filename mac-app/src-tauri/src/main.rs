@@ -1,13 +1,15 @@
 // PDF译 的 Mac 外壳。翻译、提取、生成双栏 PDF 都在页面（www/）里做，这里只负责：
 //   1. 开窗口；关窗口时只是藏起来，翻译接着跑
-//   0. 两个窗口：main 是全量版阅读器，worker 是看不见的后台引擎（Zotero 交来的书、“后台翻译文件…”都由它翻）
+//   0. main 阅读器、worker 菜单栏面板、engine-1..4 隔离的隐藏翻译引擎
 //   2. 菜单栏：小鱼按状态换表情，旁边显示进度文字；点开是一份随状态变化的菜单
 //   3. 接收 Zotero 插件发来的 pdfyi:// 链接（交给页面处理）
 //   4. 把翻好的双栏 PDF 交给 Zotero 插件挂回条目（从这里发请求，不受网页跨域限制）
 //   5. 打开文件、在访达中显示
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{HashMap, VecDeque};
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -35,18 +37,93 @@ fn mood_icon(mood: &str) -> &'static [u8] {
     }
 }
 
-// v54.1：后台任务一律由这里接收（Zotero 的 pdfyi:// 链接、菜单栏“后台翻译文件…”选的文件），
-// 先放进待办列表，再通知后台引擎来取；后台引擎启动时也会取一次，所以通知没收到也不会丢。
-// 链接原样存；本地文件存成 “file:路径”。
-struct PendingJobs(Mutex<Vec<String>>);
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Job {
+    path: String,
+    key: Option<String>,
+    lib: u64,
+    mode: String,
+}
 
-fn push_job(app: &AppHandle, job: String) {
-    if let Some(p) = app.try_state::<PendingJobs>() {
-        if let Ok(mut v) = p.0.lock() {
-            v.push(job);
+#[derive(Clone, serde::Serialize)]
+struct RunningBook {
+    job: Job,
+    started_at: u64,
+    status: serde_json::Value,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct BackgroundState {
+    queue: VecDeque<Job>,
+    running: HashMap<String, RunningBook>,
+    recent: Vec<serde_json::Value>,
+    parallelism: usize,
+    paused: bool,
+}
+
+struct PendingJobs(Mutex<BackgroundState>);
+static LINK_LAUNCH: AtomicBool = AtomicBool::new(false);
+static STARTUP_PENDING: AtomicBool = AtomicBool::new(true);
+#[cfg(target_os = "macos")]
+static APP_READY: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static LAUNCH_DECIDED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static NORMAL_LAUNCH: AtomicBool = AtomicBool::new(false);
+
+fn settings_path(app: &AppHandle, name: &str) -> Option<std::path::PathBuf> {
+    let dir = app.path().app_data_dir().ok()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(name))
+}
+
+fn persist_recent(app: &AppHandle, recent: &[serde_json::Value]) {
+    if let Some(path) = settings_path(app, "background-recent.json") {
+        if let Ok(bytes) = serde_json::to_vec(recent) { let _ = std::fs::write(path, bytes); }
+    }
+}
+
+fn publish_background(app: &AppHandle) {
+    let snapshot = app.state::<PendingJobs>().0.lock().unwrap().clone();
+    let _ = app.emit_to("worker", "background-state", snapshot);
+}
+
+fn wake_engines(app: &AppHandle) {
+    for i in 1..=4 { let _ = app.emit_to(format!("engine-{i}"), "pdfyi-job", ()); }
+}
+
+fn lifecycle_log(app: &AppHandle, label: &str, action: &str, path: &str) {
+    let line = format!("{} {} {} {}\n", now_ms(), label, action, path);
+    eprint!("{line}");
+    if let Ok(dir) = app.path().app_log_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("engines.log")) {
+            let _ = f.write_all(line.as_bytes());
         }
     }
-    let _ = app.emit_to("worker", "pdfyi-job", ());
+}
+
+fn push_job(app: &AppHandle, raw: String) {
+    let mut job = if let Some(path) = raw.strip_prefix("file:") {
+        Job { path: path.into(), key: None, lib: 1, mode: "linked".into() }
+    } else {
+        let Ok(url) = tauri::Url::parse(&raw) else { return };
+        if url.scheme() != "pdfyi" || url.host_str() != Some("translate") { return; }
+        LINK_LAUNCH.store(true, Ordering::SeqCst);
+        let q: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        let Some(path) = q.get("path").filter(|p| !p.is_empty()) else { return };
+        Job { path: path.clone(), key: q.get("key").filter(|k| !k.is_empty()).cloned(),
+            lib: q.get("lib").and_then(|s| s.parse().ok()).unwrap_or(1),
+            mode: if q.get("mode").map(String::as_str) == Some("linked") { "linked" } else { "stored" }.into() }
+    };
+    if let Ok(path) = std::fs::canonicalize(&job.path) { job.path = path.to_string_lossy().into_owned(); }
+    let state = app.state::<PendingJobs>();
+    let mut s = state.0.lock().unwrap();
+    if s.queue.iter().any(|j| j.path == job.path) || s.running.values().any(|r| r.job.path == job.path) { return; }
+    s.queue.push_back(job);
+    drop(s);
+    publish_background(app);
+    wake_engines(app);
 }
 
 // v59：后台引擎是挂在菜单栏小鱼下面的面板。点到别处时收起；刚收起的那一下又点小鱼，不要马上又弹出来
@@ -103,13 +180,106 @@ fn bg_pick(app: AppHandle) {
     pick_files_job(&app);
 }
 
-// 后台引擎来取待办任务（取走就清空）
+// 每个引擎一次只领取一本；领取和并发上限检查在同一把锁里，未就绪的引擎不会丢任务。
 #[tauri::command]
-fn take_jobs(state: tauri::State<PendingJobs>) -> Vec<String> {
-    match state.0.lock() {
-        Ok(mut v) => std::mem::take(&mut *v),
-        Err(_) => vec![],
+fn engine_pull(app: AppHandle, window: tauri::WebviewWindow) -> Option<Job> {
+    let label = window.label();
+    if !matches!(label, "engine-1" | "engine-2" | "engine-3" | "engine-4") { return None; }
+    let state = app.state::<PendingJobs>();
+    let mut s = state.0.lock().unwrap();
+    if s.paused || s.running.len() >= s.parallelism || s.running.contains_key(label) { return None; }
+    let job = s.queue.pop_front()?;
+    s.running.insert(label.into(), RunningBook { job: job.clone(), started_at: now_ms(), status: serde_json::json!({
+        "prog": { "pages": 0, "done": 0, "failPages": 0, "failParas": 0, "doneTimes": [], "phase": "loading",
+            "doneUntil": 0, "title": std::path::Path::new(&job.path).file_stem().unwrap_or_default().to_string_lossy(),
+            "from": if job.key.is_some() { "来自 Zotero" } else { "本地文件" } }, "pageState": [], "conc": 6 }) });
+    drop(s);
+    lifecycle_log(&app, label, "START", &job.path);
+    publish_background(&app);
+    Some(job)
+}
+
+#[tauri::command]
+fn engine_progress(app: AppHandle, window: tauri::WebviewWindow, status: serde_json::Value) {
+    if let Some(book) = app.state::<PendingJobs>().0.lock().unwrap().running.get_mut(window.label()) {
+        book.status = status;
     }
+    publish_background(&app);
+}
+
+#[tauri::command]
+fn engine_log(app: AppHandle, window: tauri::WebviewWindow, entry: serde_json::Value) {
+    let _ = app.emit_to("worker", "engine-log", serde_json::json!({ "engine": window.label(), "entry": entry }));
+}
+
+#[tauri::command]
+fn engine_finish(app: AppHandle, window: tauri::WebviewWindow, result: Option<serde_json::Value>) {
+    let state = app.state::<PendingJobs>();
+    let mut s = state.0.lock().unwrap();
+    let Some(book) = s.running.remove(window.label()) else { return };
+    let success = result.is_some();
+    if let Some(r) = result {
+        s.recent.retain(|old| old["source"] != r["source"]);
+        s.recent.insert(0, r);
+        s.recent.truncate(30);
+        persist_recent(&app, &s.recent);
+    }
+    drop(s);
+    lifecycle_log(&app, window.label(), if success { "FINISH" } else { "FAIL" }, &book.job.path);
+    publish_background(&app);
+    wake_engines(&app);
+}
+
+#[tauri::command]
+fn background_state(state: tauri::State<PendingJobs>) -> BackgroundState {
+    state.0.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn set_book_parallelism(app: AppHandle, count: usize) -> Result<(), String> {
+    if !(1..=4).contains(&count) { return Err("同时翻几本只能选 1–4".into()); }
+    let path = settings_path(&app, "book-parallelism.json").ok_or("找不到设置目录")?;
+    std::fs::write(path, count.to_string()).map_err(|e| e.to_string())?;
+    app.state::<PendingJobs>().0.lock().unwrap().parallelism = count;
+    publish_background(&app);
+    wake_engines(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn background_pause(app: AppHandle) {
+    let state = app.state::<PendingJobs>();
+    let mut s = state.0.lock().unwrap();
+    s.paused = !s.paused;
+    let paused = s.paused;
+    drop(s);
+    let _ = app.emit("engines-paused", paused);
+    publish_background(&app);
+    if !paused { wake_engines(&app); }
+}
+
+#[tauri::command]
+fn recent_init(app: AppHandle, recent: Vec<serde_json::Value>) {
+    let state = app.state::<PendingJobs>();
+    let mut s = state.0.lock().unwrap();
+    for r in recent {
+        if !s.recent.iter().any(|old| old["source"] == r["source"] && old["at"] == r["at"]) { s.recent.push(r); }
+    }
+    s.recent.sort_by_key(|r| std::cmp::Reverse(r["at"].as_u64().unwrap_or(0)));
+    s.recent.truncate(30);
+    persist_recent(&app, &s.recent);
+    drop(s);
+    publish_background(&app);
+}
+
+#[tauri::command]
+fn recent_imported(app: AppHandle, source: String) {
+    let state = app.state::<PendingJobs>();
+    let mut s = state.0.lock().unwrap();
+    for r in &mut s.recent { if r["source"].as_str() == Some(&source) { r["zotero"] = true.into(); } }
+    persist_recent(&app, &s.recent);
+    drop(s);
+    publish_background(&app);
 }
 
 // 页面推过来的状态（见 www/index.html 里的 trayState）
@@ -168,7 +338,12 @@ fn build_menu(app: &AppHandle, st: &TrayState) -> tauri::Result<Menu<Wry>> {
 
 // 页面上的状态一变，就调这个：换表情、换文字、重建菜单
 #[tauri::command]
-fn tray_update(app: AppHandle, state: TrayState) -> Result<(), String> {
+fn tray_update(app: AppHandle, window: tauri::WebviewWindow, state: TrayState) -> Result<(), String> {
+    if window.label() == "main" {
+        let bg = app.state::<PendingJobs>();
+        let s = bg.0.lock().unwrap();
+        if !s.running.is_empty() || !s.queue.is_empty() { return Ok(()); }
+    }
     let tray = app.tray_by_id("main").ok_or("菜单栏图标还没建好")?;
     let composed = state.image.as_ref().map_or(false, |b| !b.is_empty());
     let img = match state.image.as_ref() {
@@ -252,25 +427,95 @@ fn show_main(app: AppHandle) {
     show_window(&app);
 }
 
+#[cfg(target_os = "macos")]
+fn finish_startup(app: &AppHandle) {
+    if APP_READY.load(Ordering::SeqCst) && LAUNCH_DECIDED.load(Ordering::SeqCst)
+        && STARTUP_PENDING.swap(false, Ordering::SeqCst)
+        && NORMAL_LAUNCH.load(Ordering::SeqCst) && !LINK_LAUNCH.load(Ordering::SeqCst)
+    {
+        show_window(app);
+    }
+}
+
+// 使用 AppKit 的启动意图，不用“等几百毫秒没收到 URL 就显示”的时间猜测。
+// 通知和 Tauri Ready 谁先到都可以；必须两者都完成后才决定是否打开阅读器。
+#[cfg(target_os = "macos")]
+fn observe_application(app: &AppHandle) -> [objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2::runtime::NSObjectProtocol>>; 2] {
+    use objc2_app_kit::{NSApplicationDidFinishLaunchingNotification, NSApplicationDidHideNotification, NSApplicationLaunchIsDefaultLaunchKey};
+    use objc2_foundation::{NSNotification, NSNotificationCenter, NSNumber};
+    let h = app.clone();
+    let launched = block2::RcBlock::new(move |notification: std::ptr::NonNull<NSNotification>| {
+        let note = unsafe { notification.as_ref() };
+        let normal = note.userInfo()
+            .and_then(|info| info.objectForKey(unsafe { NSApplicationLaunchIsDefaultLaunchKey }))
+            .and_then(|value| value.downcast::<NSNumber>().ok())
+            .is_some_and(|value| value.boolValue());
+        NORMAL_LAUNCH.store(normal, Ordering::SeqCst);
+        LAUNCH_DECIDED.store(true, Ordering::SeqCst);
+        finish_startup(&h);
+    });
+    let h = app.clone();
+    let hidden = block2::RcBlock::new(move |_: std::ptr::NonNull<NSNotification>| {
+        let _ = h.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    });
+    // NSApplication 的生命周期通知在主线程发送；队列为 None，闭包只捕获可 Send 的 AppHandle。
+    unsafe {
+        let center = NSNotificationCenter::defaultCenter();
+        [
+            center.addObserverForName_object_queue_usingBlock(Some(NSApplicationDidFinishLaunchingNotification), None, None, &launched),
+            center.addObserverForName_object_queue_usingBlock(Some(NSApplicationDidHideNotification), None, None, &hidden),
+        ]
+    }
+}
+
 fn show_window(app: &AppHandle) {
+    STARTUP_PENDING.store(false, Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    #[cfg(target_os = "macos")]
+    let _ = app.show();
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
+    // Accessory 程序被明确要求打开阅读器时，光 makeKeyAndOrderFront 不会激活应用。
+    // 只在这条用户意图路径主动激活；后台链接从不走这里。
+    #[cfg(target_os = "macos")]
+    let _ = app.run_on_main_thread(|| {
+        if let Some(mtm) = objc2::MainThreadMarker::new() {
+            #[allow(deprecated)]
+            objc2_app_kit::NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        }
+    });
 }
 
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.activate_ignoring_other_apps(false);
+    let mut app = builder
         // 已经开着时再被叫起来（比如 Zotero 又交来一本），不再开第二个，链接交给开着的那个
-        .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}))
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            let links: Vec<_> = argv.iter().filter(|s| s.starts_with("pdfyi:")).collect();
+            if links.is_empty() { show_window(app); }
+            else { for url in links { push_job(app, url.clone()); } }
+        }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             tray_update,
-            take_jobs,
+            engine_pull,
+            engine_progress,
+            engine_finish,
+            engine_log,
+            background_state,
+            background_pause,
+            set_book_parallelism,
+            recent_init,
+            recent_imported,
             bg_pick,
             zotero_attach,
             zotero_import,
@@ -279,7 +524,16 @@ fn main() {
             show_main
         ])
         .setup(|app| {
-            app.manage(PendingJobs(Mutex::new(vec![])));
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            let parallelism = settings_path(app.handle(), "book-parallelism.json")
+                .and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| s.parse::<usize>().ok())
+                .filter(|n| (1..=4).contains(n)).unwrap_or(2);
+            let recent = settings_path(app.handle(), "background-recent.json")
+                .and_then(|p| std::fs::read(p).ok()).and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+            app.manage(PendingJobs(Mutex::new(BackgroundState {
+                queue: VecDeque::new(), running: HashMap::new(), recent, parallelism, paused: false,
+            })));
             // Zotero 交来的链接：程序已经开着时走这里
             let h = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
@@ -330,21 +584,46 @@ fn main() {
                 WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
                     let _ = window.hide();
+                    if window.label() == "main" {
+                        #[cfg(target_os = "macos")]
+                        let _ = window.app_handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    }
                 }
                 // 面板（worker 窗口）点到别处就收起；它藏起来以后照样在翻
                 WindowEvent::Focused(false) if window.label() == "worker" => {
                     LAST_HIDE.store(now_ms(), Ordering::Relaxed);
                     let _ = window.hide();
                 }
+                WindowEvent::Focused(false) if window.label() == "main" && !window.is_visible().unwrap_or(false) => {
+                    #[cfg(target_os = "macos")]
+                    let _ = window.app_handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
+                }
                 _ => {}
             }
         })
         .build(tauri::generate_context!())
-        .expect("PDF译 启动失败")
-        .run(|app, event| {
-            // 点程序坞图标时把窗口叫回来
-            if let tauri::RunEvent::Reopen { .. } = event {
-                show_window(app);
+        .expect("PDF译 启动失败");
+    // 必须在 run() 前设置 Tao 的启动策略；setup 时才改会先短暂应用默认 Regular，
+    // 即使 Info.plist 是 LSUIElement，也可能闪一下 Dock 图标。
+    #[cfg(target_os = "macos")]
+    app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    #[cfg(target_os = "macos")]
+    let _application_observers = observe_application(app.handle());
+    app.run(|app, event| {
+            match event {
+                tauri::RunEvent::Ready => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        APP_READY.store(true, Ordering::SeqCst);
+                        finish_startup(app);
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    if !LINK_LAUNCH.load(Ordering::SeqCst) { show_window(app); }
+                }
+                tauri::RunEvent::Reopen { .. } => {
+                    if !STARTUP_PENDING.load(Ordering::SeqCst) { show_window(app); }
+                }
+                _ => {}
             }
         });
 }

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "PDF译",
-  "version": "0.63.0",
+  "version": "0.64.0",
   "description": "在 PDF 附件上右键翻译并挂回双栏 PDF，或从 PDF译 一键导入原文与双栏 PDF，按原文内容去重并尝试识别元数据。",
   "author": "小狐",
   "applications": {

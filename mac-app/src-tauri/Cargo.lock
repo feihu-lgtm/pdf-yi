@@ -2532,8 +2532,12 @@ dependencies = [
 
 [[package]]
 name = "pdf-yi"
-version = "0.63.1"
+version = "0.64.0"
 dependencies = [
+ "block2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "serde",
  "serde_json",
  "tauri",

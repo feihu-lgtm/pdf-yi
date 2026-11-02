@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"><title>PDF译 后台</title>
-<!-- 后台引擎：挂在菜单栏小鱼下面的小面板。平时看不见，照样在翻；左键点菜单栏的小鱼弹出，点别处收起。 -->
+<!-- worker 是菜单栏仪表盘；?engine=1..4 只运行一本书的隐藏引擎，不显示界面。 -->
 <script>window.PDFYI_VENDOR='vendor/';window.PDFYI_WORKER=true;</script>
 <link rel="stylesheet" href="vendor/xiaoyu-fonts.css">
 <script src="vendor/pdf.min.js"></script>
@@ -70,6 +70,7 @@ h3{margin:16px 0 6px;font:600 12.5px var(--sans);color:var(--ink2)}
 
 /* ── 现在：书页格子 ── */
 .book{background:var(--paper);box-shadow:var(--px2),4px 4px 0 0 var(--shade);padding:12px 12px 10px}
+.book+.book{margin-top:14px}
 .book-title{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .book-from{font-size:11.5px;color:var(--mute);margin-top:1px}
 .tiles{display:flex;flex-wrap:wrap;gap:var(--tg,3px);margin:11px 0 9px}
@@ -173,11 +174,14 @@ ol.log li.open .lg-full{display:block}
     </div>
     <ol class="log" id="log"></ol>
     <div class="pager" id="log-pager"></div>
+  </section>
   <section class="pane" id="tab-bar" hidden>
     <div class="preview">
       <div class="bar light"><span>Wi‑Fi</span><canvas id="pv-light" height="44"></canvas><span>10:42</span></div>
       <div class="bar dark"><span>Wi‑Fi</span><canvas id="pv-dark" height="44"></canvas><span>10:42</span></div>
     </div>
+    <div class="field"><label for="set-books">同时翻几本</label><select id="set-books"><option value="1">1 本</option><option value="2">2 本</option><option value="3">3 本</option><option value="4">4 本</option></select></div>
+    <p class="note">默认 2 本。修改后用于接下来的任务；已经在翻的书不中断。每本书的请求并发仍沿用阅读器设置。</p>
     <div class="field"><label for="set-top">上面一行</label><select id="set-top"></select></div>
     <div class="field"><label for="set-bottom">下面一行</label><select id="set-bottom"></select></div>
     <label class="check"><input type="checkbox" id="set-face">显示小鱼的脸</label>

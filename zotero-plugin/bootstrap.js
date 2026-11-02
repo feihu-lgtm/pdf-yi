@@ -78,7 +78,7 @@ async function translateSelected(win) {
     let url = 'pdfyi://translate?path=' + encodeURIComponent(path)
       + '&key=' + a.key + '&lib=' + a.libraryID + '&mode=' + (linked ? 'linked' : 'stored');
     try {
-      await Zotero.Utilities.Internal.exec('/usr/bin/open', [url]);
+      await Zotero.Utilities.Internal.exec('/usr/bin/open', ['-g', url]);
       sent++;
     } catch (e) {
       Zotero.logError(e);

@@ -2,6 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- 先以无 Dock 图标的后台程序启动；只有明确打开阅读器才切到 Regular。 -->
+  <key>LSUIElement</key>
+  <true/>
   <!-- 窗口藏起来时别让 macOS 给它降速（App Nap），翻译要接着跑 -->
   <key>NSAppSleepDisabled</key>
   <true/>

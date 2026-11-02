@@ -1,10 +1,12 @@
-// PDF译 后台引擎：挂在菜单栏小鱼下面的小面板。看不见的时候照样在翻（窗口设了 backgroundThrottling: disabled）。
-// 流程：接任务（Zotero 链接 / “添加 PDF”）→ 逐页提取、合并、翻译 → 生成双栏 PDF → 存到原文件旁边或挂回 Zotero。
+// worker 是菜单栏仪表盘；?engine=N 是隔离的隐藏翻译引擎，每次从 Rust 领取一本书。
+// Rust 持有共享队列、运行状态和最近结果；只有仪表盘镜像写入旧版 localStorage 最近列表。
 // 用到的核心模块：core/textutil.js、core/store.js、core/extract.js、core/translate.js、core/bilingual.js。
 // 缓存和全量版是同一份：后台翻过的书，用全量版打开直接有译文。
 (function(){
 'use strict';
 var T=window.__TAURI__||null;
+var engine=new URLSearchParams(location.search).has('engine');
+if(engine)document.documentElement.style.display='none';
 pdfjsLib.GlobalWorkerOptions.workerSrc=VENDOR+'pdf.worker.min.js';
 var CMAP=VENDOR+'cmaps/';
 var $=function(id){return document.getElementById(id)};
@@ -20,8 +22,9 @@ function summarize(type,out,ok){var s=String(out||'');if(!ok)return s;
   return s}
 window.addTransLog=function(page,input,output,model,type,ok){type=type||'翻译';ok=ok!==false;
   var full=String(output||''),msg=summarize(type,full,ok);
-  LOG.unshift({id:++logSeq,t:hhmmss(),page:page,type:type,ok:ok,msg:msg.slice(0,300),full:msg!==full||full.length>300?full.slice(0,4000):''});
-  if(LOG.length>200)LOG.length=200;renderLog()};
+  var entry={id:++logSeq,t:hhmmss(),at:Date.now(),page:page,type:type,ok:ok,msg:msg.slice(0,300),full:msg!==full||full.length>300?full.slice(0,4000):''};
+  if(engine&&T){T.core.invoke('engine_log',{entry:entry}).catch(function(){});return}
+  LOG.unshift(entry);if(LOG.length>200)LOG.length=200;renderLog()};
 window.toast=function(msg,kind){if(kind==='err')addTransLog('-','',msg,'magpie','提示',false)};
 window.setStatus=function(){};window.setProgress=function(){};
 function log(msg,ok){addTransLog('-','',msg,'magpie','引擎',ok!==false)}
@@ -38,16 +41,23 @@ var BAR_KINDS=[['pct','百分比（40%）'],['pages','页数（12/30）'],['eta'
 var bar={top:lsGet('pdfyi_bar_top','pct'),bottom:lsGet('pdfyi_bar_bottom','eta'),face:lsGet('pdfyi_bar_face','1')!=='0',sym:lsGet('pdfyi_bar_sym','1')!=='0',fail:lsGet('pdfyi_bar_fail','1')!=='0'};
 
 // ══ 任务队列 ══
-var queue=[],job=null,paused=false,lastOut=null;
+var queue=[],job=null,paused=false,lastOut=null,running=[],parallelism=2,pulling=false,completedResult=null,doneTimer=null;
 var prog={pages:0,done:0,failPages:0,failParas:0,doneTimes:[],phase:'idle',doneUntil:0,title:'',from:''};
 var pageState=[];// 每页：w 排队、t 正在翻、d 翻好、f 有失败、u 读不出字、e 没有正文
 var recent=[];try{recent=JSON.parse(lsGet('pdfyi_recent','[]'))||[]}catch(e){recent=[]}
-function enqueue(j){if(!j||!j.path){log('收到的任务没有文件路径',false);return}
-  if(queue.some(function(x){return x.path===j.path})||(job&&job.path===j.path)){log('已经在队列里：'+baseOf(j.path));return}
-  log('加入队列：'+baseOf(j.path)+(j.key?'（来自 Zotero）':''));queue.push(j);queuePage=1;refresh();next()}
-function next(){if(job||!queue.length)return;job=queue.shift();
-  run(job).catch(function(e){addTransLog('-','',baseOf(job.path)+' 没翻成：'+(e&&e.message||e),'magpie','任务',false);notify('这一本没翻成',baseOf(job.path)+'：'+(e&&e.message||e))})
-    .finally(function(){job=null;if(prog.phase!=='done')prog.phase='idle';refresh();Promise.resolve().then(next)})}// 不用计时器：看不见的窗口里计时器可能被冻结
+async function next(){
+  if(!engine||!T||job||pulling)return;pulling=true;var claimed=false;
+  try{
+    var j=await T.core.invoke('engine_pull');if(!j)return;
+    claimed=true;job=j;completedResult=null;
+    prog={pages:0,done:0,failPages:0,failParas:0,doneTimes:[],phase:'loading',doneUntil:0,title:baseOf(j.path),from:j.key?'来自 Zotero':'本地文件'};pageState=[];refresh();
+    try{await run(j)}
+    catch(e){addTransLog('-','',baseOf(j.path)+' 没翻成：'+(e&&e.message||e),'magpie','任务',false);notify('这一本没翻成',baseOf(j.path)+'：'+(e&&e.message||e))}
+    finally{await T.core.invoke('engine_finish',{result:completedResult});job=null}
+  }catch(e){log('取任务或归还引擎失败：'+(e.message||e),false)}
+  finally{pulling=false}
+  if(claimed&&!job)Promise.resolve().then(next);
+}
 function baseOf(p){return p.slice(p.lastIndexOf('/')+1).replace(/\.pdf$/i,'')}
 function dirOf(p){var i=p.lastIndexOf('/');return i>=0?p.slice(0,i):'.'}
 
@@ -131,7 +141,7 @@ function countFails(p,arr){var f=arr.filter(function(t){return String(t).indexOf
 // ══ 保存：Zotero 交来的照原附件方式挂回；其余存到原文件旁边 ══
 async function saveOut(j,bytes){
   var out;
-  if(j.key&&j.mode==='stored'){var base=(await T.path.appDataDir()).replace(/\/$/,'')+'/out';try{await T.fs.mkdir(base,{recursive:true})}catch(e){}out=base+'/'+baseOf(j.path)+'_双栏.pdf'}
+  if(j.key&&j.mode==='stored'){var base=(await T.path.appDataDir()).replace(/\/$/,'')+'/out/'+j.lib+'-'+j.key;try{await T.fs.mkdir(base,{recursive:true})}catch(e){}out=base+'/'+baseOf(j.path)+'_双栏.pdf'}
   else out=dirOf(j.path)+'/'+baseOf(j.path)+'_双栏.pdf';
   await T.fs.writeFile(out,bytes);
   if(!j.key)return {path:out,zotero:false};
@@ -140,7 +150,7 @@ async function saveOut(j,bytes){
   if(!r.ok)throw new Error('双栏 PDF 存好了（'+out+'），但没挂上 Zotero：'+(r.error||res));
   return {path:j.mode==='stored'?null:out,zotero:true}}
 function notify(title,body){try{if(notifyOn&&T&&T.notification)T.notification.sendNotification({title:title,body:body})}catch(e){}}
-function addRecent(r){recent=[r].concat(recent.filter(function(x){return x.path!==r.path||!r.path})).slice(0,30);recentPage=1;lsSet('pdfyi_recent',JSON.stringify(recent))}
+function addRecent(r){completedResult=r}
 
 // ══ 菜单栏：小鱼的脸 + 状态符号 + 两行小字（按设置画） ══
 var _imgP={};
@@ -196,29 +206,34 @@ async function pushTray(){
       try{st.image=await canvasBytes(await trayCanvas(st.mood,st.lines,bar))}catch(e){st.image=null}
       await T.core.invoke('tray_update',{state:st}).catch(function(){})}while(trayAgain)}
   finally{trayBusy=false}}
-function refresh(){renderNow();pushTray()}
+function refresh(){
+  if(engine){if(T&&job)T.core.invoke('engine_progress',{status:{prog:prog,pageState:pageState,conc:getConc()}}).catch(function(){});return}
+  renderNow();pushTray()}
 
 // ══ 面板：现在 ══
 function esc(t){return String(t==null?'':t).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
-function moodNow(){return prog.phase==='building'||Date.now()<prog.doneUntil?'inspired':(prog.phase==='translating'?(paused?'normal':'thinking'):'sleeping')}
+function moodNow(){return prog.phase==='building'||Date.now()<prog.doneUntil?'inspired':(running.length?(paused?'normal':'thinking'):'sleeping')}
 function ago(t){var s=Math.round((Date.now()-t)/1000);if(s<60)return '刚刚';var m=Math.round(s/60);if(m<60)return m+' 分钟前';var h=Math.round(m/60);if(h<24)return h+' 小时前';return Math.round(h/24)+' 天前'}
+function bookCard(book){
+  var p=book.status.prog||{},states=book.status.pageState||[],n=p.pages||0,eta=etaText(p);
+  var group=Math.max(1,Math.ceil(n/240)),cells=Math.ceil(n/group);
+  var per=Math.max(1,Math.min(cells,Math.ceil(cells/Math.max(1,Math.ceil(cells/24))))),ts=Math.max(5,Math.min(13,Math.floor(319/per)-3)),tiles='';
+  for(var c=0;c<cells;c++){var seen={};for(var k=c*group+1;k<=Math.min(n,(c+1)*group);k++)seen[states[k]||'w']=1;
+    var st=seen.f?'f':seen.t?'t':seen.w?'w':seen.u?'u':seen.e?'e':'d';
+    tiles+='<i class="tile '+st+'" title="第 '+(c*group+1)+(group>1?'–'+Math.min(n,(c+1)*group):'')+' 页"></i>'}
+  return '<div class="book"><div class="book-title">'+esc(p.title||baseOf(book.job.path))+'</div><div class="book-from">'+esc(p.from||'本地文件')+'，每本请求并发 '+(book.status.conc||6)+'</div>'
+    +'<div class="tiles" style="--ts:'+ts+'px">'+tiles+'</div><div class="stats"><span class="big">'+(p.done||0)+'<small>/ '+n+' 页</small></span>'
+    +'<span class="chip">'+(p.phase==='building'?'正在生成双栏 PDF':p.phase==='loading'?'正在读取 PDF':paused?'已暂停':eta||'正在翻译')+'</span>'
+    +(p.failPages?'<span class="chip bad">'+p.failPages+' 页有失败段落（'+(p.failParas||0)+' 段）</span>':'')+'</div></div>'}
 function renderNow(){
   if(!$('job'))return;
-  var mood=moodNow(),busy=prog.phase==='translating',eta=etaText();
+  var mood=moodNow(),busy=running.length>0,eta=etaText();
   $('face').style.setProperty('--img','url('+VENDOR+'tray/face-'+mood+'.png)');
-  $('say').textContent=prog.phase==='building'?'在把译文排进双栏 PDF。':busy?(paused?'先停下了，点“继续”接着翻。':'在翻《'+prog.title+'》'+(eta?'，'+eta+'翻完。':'。')):(Date.now()<prog.doneUntil?'《'+prog.title+'》做好了。':(queue.length?'马上开始下一本。':'在睡觉，没有要翻的书。'));
-  var bp=$('btn-pause');bp.disabled=!busy;bp.textContent=paused?'继续':'暂停';
+  $('say').textContent=busy?(paused?'全部已暂停，路上的请求翻完就停。':'同时在翻 '+running.length+' 本，合计 '+prog.done+'/'+prog.pages+' 页。'):(Date.now()<prog.doneUntil?'《'+prog.title+'》做好了。':queue.length?'等空闲引擎领取任务。':'在睡觉，没有要翻的书。');
+  var bp=$('btn-pause');bp.disabled=!busy&&!paused;bp.textContent=paused?'继续':'暂停';
   var h='';
-  if(busy||prog.phase==='building'){
-    var n=prog.pages,group=Math.max(1,Math.ceil(n/240)),cells=Math.ceil(n/group);
-    var per=Math.max(1,Math.min(cells,Math.ceil(cells/Math.max(1,Math.ceil(cells/24))))),ts=Math.max(5,Math.min(13,Math.floor((316+3)/per)-3));
-    var tiles='';for(var c=0;c<cells;c++){var st='d',seen={};for(var k=c*group+1;k<=Math.min(n,(c+1)*group);k++)seen[pageState[k]]=1;
-      st=seen.f?'f':seen.t?'t':seen.w?'w':seen.u?'u':seen.e?'e':'d';tiles+='<i class="tile '+st+'" title="第 '+(c*group+1)+(group>1?'–'+Math.min(n,(c+1)*group):'')+' 页"></i>'}
-    h='<div class="book"><div class="book-title">'+esc(prog.title)+'</div><div class="book-from">'+esc(prog.from)+'，并发 '+getConc()+'</div>'
-      +'<div class="tiles" style="--ts:'+ts+'px">'+tiles+'</div>'
-      +'<div class="stats"><span class="big">'+prog.done+'<small>/ '+n+' 页</small></span>'
-      +(prog.phase==='building'?'<span class="chip">正在生成双栏 PDF</span>':(eta&&!paused?'<span class="chip">'+eta+'</span>':''))
-      +(prog.failPages?'<span class="chip bad">'+prog.failPages+' 页有失败段落</span>':'')+'</div></div>';
+  if(busy){
+    h=running.map(bookCard).join('');
   }else{
     var doneNow=Date.now()<prog.doneUntil;
     var targetP=lastOut||(recent[0]&&recent[0].path);
@@ -265,6 +280,8 @@ async function renderPreview(){
     x.drawImage(c,0,0);x.globalCompositeOperation='source-in';x.fillStyle=id==='pv-dark'?'#ffffff':'#1d1d1f';x.fillRect(0,0,cv.width,44);x.globalCompositeOperation='source-over'})}
 function initBarSettings(){
   ['set-top','set-bottom'].forEach(function(id){var s=$(id);s.innerHTML=BAR_KINDS.map(function(k){return '<option value="'+k[0]+'">'+k[1]+'</option>'}).join('')});
+  $('set-books').value=String(parallelism);
+  $('set-books').onchange=async function(){try{await T.core.invoke('set_book_parallelism',{count:Number(this.value)})}catch(e){this.value=String(parallelism);log('保存同时翻几本失败：'+e,false)}};
   $('set-top').value=bar.top;$('set-bottom').value=bar.bottom;$('set-face').checked=bar.face;$('set-sym').checked=bar.sym;$('set-fail').checked=bar.fail;
   var save=function(){bar.top=$('set-top').value;bar.bottom=$('set-bottom').value;bar.face=$('set-face').checked;bar.sym=$('set-sym').checked;bar.fail=$('set-fail').checked;
     lsSet('pdfyi_bar_top',bar.top);lsSet('pdfyi_bar_bottom',bar.bottom);lsSet('pdfyi_bar_face',bar.face?'1':'0');lsSet('pdfyi_bar_sym',bar.sym?'1':'0');lsSet('pdfyi_bar_fail',bar.fail?'1':'0');
@@ -275,7 +292,7 @@ function initBarSettings(){
 // ══ 面板：交互 ══
 function showTab(name){document.querySelectorAll('.tabs button').forEach(function(b){b.classList.toggle('on',b.dataset.tab===name)});
   ['now','log','bar'].forEach(function(t){$('tab-'+t).hidden=t!==name});if(name==='log')renderLog();if(name==='bar')renderPreview()}
-function togglePause(){if(prog.phase!=='translating')return;paused=!paused;log(paused?'暂停（路上的请求翻完就停）':'继续');if(!paused)resume();refresh()}
+function togglePause(){if(T)T.core.invoke('background_pause').catch(function(e){log('暂停失败：'+e,false)})}
 function bindUI(){
   document.querySelectorAll('.tabs button').forEach(function(b){b.onclick=function(){showTab(b.dataset.tab)}});
   $('btn-pause').onclick=togglePause;
@@ -319,34 +336,55 @@ async function importRecent(i){
     }
     var raw=await T.core.invoke('zotero_import',{body:{source_path:r.source,output_path:r.path,title:r.title,doi:doi,csl:csl}}),ans={};try{ans=JSON.parse(raw)}catch(e){}
     if(!ans.ok)throw new Error(ans.error||raw||'Zotero 没有确认导入');
-    r.zotero=true;r.importing=false;lsSet('pdfyi_recent',JSON.stringify(recent));log('已加入 Zotero：'+(ans.title||r.title));refresh()}
-  catch(e){r.importing=false;log('加入 Zotero 失败：'+(e.message||e),false);refresh()}}
+    await T.core.invoke('recent_imported',{source:r.source});recent.forEach(function(x){if(x.source===r.source)x.importing=false});log('已加入 Zotero：'+(ans.title||r.title));refresh()}
+  catch(e){recent.forEach(function(x){if(x.source===r.source)x.importing=false});log('加入 Zotero 失败：'+(e.message||e),false);refresh()}}
   document.querySelectorAll('#log-filter button').forEach(function(b){b.onclick=function(){logFilter=b.dataset.f;logPage=1;document.querySelectorAll('#log-filter button').forEach(function(x){x.classList.toggle('on',x===b)});renderLog()}});
   $('log-copy').onclick=function(){var t=logText();(navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(function(){$('log-copy').textContent='已复制'},function(){$('log-copy').textContent='复制失败'})};
   $('log-clear').onclick=function(){LOG=[];logSeenBad=0;logOpen={};renderLog()};
   $('log').onclick=function(e){var li=e.target.closest('li.more');if(!li||e.target.closest('.lg-full'))return;var id=li.dataset.id;if(logOpen[id])delete logOpen[id];else logOpen[id]=1;li.classList.toggle('open',!!logOpen[id])};
   initBarSettings();renderNow();renderLog()}
-bindUI();
+if(!engine)bindUI();
 
-// ══ 接任务：都由 Rust 接收后放进待办列表，这里去取（本地文件是“file:路径”） ══
-function onDeepLink(u){try{var url=new URL(u);if(url.protocol!=='pdfyi:'){log('不认识的链接：'+u,false);return}var q=url.searchParams;
-  enqueue({path:q.get('path'),key:q.get('key'),lib:parseInt(q.get('lib'))||1,mode:q.get('mode')==='linked'?'linked':'stored'})}catch(e){log('链接解析失败：'+u+'：'+e,false)}}
-async function drain(why){try{var js=await T.core.invoke('take_jobs');if(js&&js.length)log('取到 '+js.length+' 个任务（'+why+'）');
-  (js||[]).forEach(function(x){if(String(x).indexOf('file:')===0)enqueue({path:String(x).slice(5)});else onDeepLink(String(x))})}catch(e){log('取任务失败：'+e,false)}}
-if(T){
-  log('后台引擎启动：读文件 '+(!!(T.fs&&T.fs.readFile))+'，写文件 '+(!!(T.fs&&T.fs.writeFile))+'，事件 '+(!!T.event)+'，通知 '+(!!T.notification));
-  T.event.listen('pdfyi-job',function(){drain('收到通知')}).catch(function(e){log('监听任务通知失败：'+e,false)});
-  T.event.listen('popover-shown',function(){renderNow();renderLog()}).catch(function(){});
-  drain('启动时');
-  T.event.listen('tray-action',function(ev){var id=String(ev.payload||'');
-    if(id==='pause')togglePause();
-    else if(id==='progress')T.core.invoke('show_main').catch(function(){});
-    else if(id==='open_last'&&lastOut)T.core.invoke('open_path',{path:lastOut}).catch(function(){});
-    else if(id==='reveal'&&lastOut)T.core.invoke('reveal_path',{path:lastOut}).catch(function(){});
-    else if(id==='notify'){notifyOn=!notifyOn;lsSet('pdfyi_notify',notifyOn?'1':'0');pushTray()}});
-  try{if(T.notification)T.notification.isPermissionGranted().then(function(g){if(!g)T.notification.requestPermission()}).catch(function(){})}catch(e){}
-  pushTray();
+// ══ Rust 是队列和完成列表的唯一所有者；面板只订阅聚合状态，绝不领取任务 ══
+function receiveState(s){
+  if(engine){paused=!!s.paused;if(!paused)resume();return}
+  queue=s.queue||[];running=Object.keys(s.running||{}).sort().map(function(k){return s.running[k]});
+  paused=!!s.paused;parallelism=s.parallelism||2;
+  var importing={};recent.forEach(function(r){if(r.importing)importing[r.source]=true});
+  recent=s.recent||[];recent.forEach(function(r){if(importing[r.source])r.importing=true});
+  lsSet('pdfyi_recent',JSON.stringify(recent.map(function(r){var copy=Object.assign({},r);delete copy.importing;return copy})));
+  lastOut=(recent.find(function(r){return r.path})||{}).path||null;
+  prog={pages:0,done:0,failPages:0,failParas:0,doneTimes:[],phase:'idle',doneUntil:0,title:'',from:''};
+  running.forEach(function(b){var p=b.status.prog||{};prog.pages+=p.pages||0;prog.done+=p.done||0;prog.failPages+=p.failPages||0;prog.failParas+=p.failParas||0;prog.doneTimes=prog.doneTimes.concat(p.doneTimes||[])});
+  prog.doneTimes.sort(function(a,b){return a-b});
+  if(running.length){prog.phase=running.every(function(b){return b.status.prog.phase==='building'})?'building':'translating';prog.title=running.length+' 本同时翻译'}
+  else if(recent.length){prog.title=recent[0].title;prog.pages=recent[0].pages;prog.doneUntil=recent[0].at+30000}
+  clearTimeout(doneTimer);if(!running.length&&prog.doneUntil>Date.now())doneTimer=setTimeout(refresh,prog.doneUntil-Date.now()+100);
+  $('set-books').value=String(parallelism);refresh();
 }
-// 给测试和调试用
-window.PDFYI_WORKER={enqueue:enqueue,state:function(){return {job:job,queue:queue.slice(),prog:prog,paused:paused,lastOut:lastOut,pageState:pageState.slice(),log:LOG.slice(0,40),bar:bar,recent:recent}}};
+if(T)(async function(){
+  if(engine){
+    await T.event.listen('pdfyi-job',function(){next()});
+    await T.event.listen('engines-paused',function(ev){paused=!!ev.payload;if(!paused){resume();next()}});
+    receiveState(await T.core.invoke('background_state'));
+    log('隐藏引擎启动');next();
+    window.addEventListener('storage',function(ev){if(ev.key==='pdfyi_notify')notifyOn=ev.newValue!=='0'});
+  }else{
+    await T.event.listen('background-state',function(ev){receiveState(ev.payload)});
+    await T.event.listen('engine-log',function(ev){
+      var entry=ev.payload.entry;entry.id=++logSeq;entry.msg='['+ev.payload.engine+'] '+entry.msg;LOG.unshift(entry);if(LOG.length>200)LOG.length=200;renderLog();
+    });
+    await T.event.listen('popover-shown',function(){renderNow();renderLog()});
+    await T.event.listen('tray-action',function(ev){var id=String(ev.payload||'');
+      if(id==='pause')togglePause();
+      else if(id==='progress')T.core.invoke('show_main').catch(function(){});
+      else if(id==='open_last'&&lastOut)T.core.invoke('open_path',{path:lastOut}).catch(function(){});
+      else if(id==='reveal'&&lastOut)T.core.invoke('reveal_path',{path:lastOut}).catch(function(){});
+      else if(id==='notify'){notifyOn=!notifyOn;lsSet('pdfyi_notify',notifyOn?'1':'0');pushTray()}});
+    await T.core.invoke('recent_init',{recent:recent});
+    receiveState(await T.core.invoke('background_state'));
+    log('后台面板启动：最多同时翻 '+parallelism+' 本');
+  }
+})().catch(function(e){log('启动失败：'+(e.message||e),false)});
+window.PDFYI_WORKER={state:function(){return {engine:engine,job:job,queue:queue.slice(),running:running,parallelism:parallelism,prog:prog,paused:paused,lastOut:lastOut,pageState:pageState.slice(),log:LOG.slice(0,40),bar:bar,recent:recent}}};
 })();

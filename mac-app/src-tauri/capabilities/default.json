@@ -1,10 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "PDF译 两个窗口（全量版 main、后台引擎 worker）的权限：打开和存储文件、读写用户目录下的 PDF、接收 pdfyi:// 链接、通知",
+  "description": "PDF译 阅读器、菜单栏面板与隔离翻译引擎：PDF 读写、事件、通知",
   "windows": [
     "main",
-    "worker"
+    "worker",
+    "engine-*"
   ],
   "permissions": [
     "core:default",
@@ -31,6 +32,12 @@
         },
         {
           "path": "/Volumes/**"
+        },
+        {
+          "path": "/tmp/**"
+        },
+        {
+          "path": "/private/tmp/**"
         }
       ]
     }
