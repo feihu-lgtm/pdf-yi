@@ -181,7 +181,8 @@ ol.log li.open .lg-full{display:block}
       <div class="bar dark"><span>Wi‑Fi</span><canvas id="pv-dark" height="44"></canvas><span>10:42</span></div>
     </div>
     <div class="field"><label for="set-books">同时翻几本</label><select id="set-books"><option value="1">1 本</option><option value="2">2 本</option><option value="3">3 本</option><option value="4">4 本</option></select></div>
-    <p class="note">默认 2 本。修改后用于接下来的任务；已经在翻的书不中断。每本书的请求并发仍沿用阅读器设置。</p>
+    <div class="field"><label for="set-conc">每本同时发几个请求</label><select id="set-conc"><option value="6">6（默认）</option><option value="8">8</option><option value="10">10</option><option value="12">12</option><option value="16">16</option><option value="20">20</option><option value="24">24</option><option value="30">30（最快，风险也最大）</option></select></div>
+    <p class="note">默认同时翻 2 本，修改后用于接下来的任务。每本的请求并发与阅读器同步，正在翻的书从下一次派发页面起生效。</p>
     <div class="field"><label for="set-top">上面一行</label><select id="set-top"></select></div>
     <div class="field"><label for="set-bottom">下面一行</label><select id="set-bottom"></select></div>
     <label class="check"><input type="checkbox" id="set-face">显示小鱼的脸</label>

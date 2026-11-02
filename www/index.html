@@ -1329,7 +1329,8 @@ function maxPageNum(){var a=allPageNums();return a.length?Math.max.apply(null,a)
 // v35：并发数由设置里的“同时发几个请求”决定，默认 6，所有环节共用；不再写死 25 / 50
 function getConc(){var v=6;try{v=parseInt(localStorage.getItem('pdfyi_conc'))||6}catch(e){}return Math.max(6,Math.min(30,v))}
 (function(){var sel=$('conc-select');if(!sel)return;var _c=getConc();try{var _raw=parseInt(localStorage.getItem('pdfyi_conc'));if(_raw&&_raw!==_c)localStorage.setItem('pdfyi_conc',String(_c))}catch(e){}sel.value=String(_c);if(!sel.value)sel.value='6';
-  sel.addEventListener('change',function(){try{localStorage.setItem('pdfyi_conc',sel.value)}catch(e){}CONC=getConc();toast('同时发 '+sel.value+' 个请求，下一批开始生效','ok')})})();
+  sel.addEventListener('change',function(){try{localStorage.setItem('pdfyi_conc',sel.value)}catch(e){}CONC=getConc();toast('同时发 '+sel.value+' 个请求，下一批开始生效','ok')});
+  window.addEventListener('storage',function(e){if(e.key==='pdfyi_conc'){sel.value=String(getConc());CONC=getConc()}})})();
 var savedEnCache={};// v33：与译文缓存配套保存的原文分段 {texts,bboxes}
 function escHtml(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function formatTransLogText(){

@@ -59,6 +59,7 @@ struct BackgroundState {
     recent: Vec<serde_json::Value>,
     parallelism: usize,
     paused: bool,
+    request_concurrency: Option<usize>,
 }
 
 struct PendingJobs(Mutex<BackgroundState>);
@@ -108,9 +109,19 @@ fn push_job(app: &AppHandle, raw: String) {
         Job { path: path.into(), key: None, lib: 1, mode: "linked".into() }
     } else {
         let Ok(url) = tauri::Url::parse(&raw) else { return };
-        if url.scheme() != "pdfyi" || url.host_str() != Some("translate") { return; }
+        if url.scheme() != "pdfyi" { return; }
         LINK_LAUNCH.store(true, Ordering::SeqCst);
         let q: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        if url.host_str() == Some("settings") {
+            if let Some(count) = q.get("conc").and_then(|v| v.parse().ok()) {
+                let _ = set_request_concurrency(app.clone(), count);
+            }
+            if let Some(count) = q.get("books").and_then(|v| v.parse().ok()) {
+                let _ = set_book_parallelism(app.clone(), count);
+            }
+            return;
+        }
+        if url.host_str() != Some("translate") { return; }
         let Some(path) = q.get("path").filter(|p| !p.is_empty()) else { return };
         Job { path: path.clone(), key: q.get("key").filter(|k| !k.is_empty()).cloned(),
             lib: q.get("lib").and_then(|s| s.parse().ok()).unwrap_or(1),
@@ -201,9 +212,25 @@ fn engine_pull(app: AppHandle, window: tauri::WebviewWindow) -> Option<Job> {
 
 #[tauri::command]
 fn engine_progress(app: AppHandle, window: tauri::WebviewWindow, status: serde_json::Value) {
-    if let Some(book) = app.state::<PendingJobs>().0.lock().unwrap().running.get_mut(window.label()) {
-        book.status = status;
+    let mut report = None;
+    {
+        let state = app.state::<PendingJobs>();
+        let mut s = state.0.lock().unwrap();
+        if let Some(book) = s.running.get_mut(window.label()) {
+            let done = status["prog"]["done"].as_u64().unwrap_or(0);
+            let before = book.status["prog"]["done"].as_u64().unwrap_or(0);
+            let cached = status["cachedPages"].as_u64().unwrap_or(0);
+            if status["conc"] != book.status["conc"] || status["cachedPages"] != book.status["cachedPages"]
+                || status["prog"]["phase"] != book.status["prog"]["phase"]
+                || (done > before && (before == 0 || done == cached || done % 24 == 0))
+            {
+                report = Some((book.job.path.clone(), format!("PROGRESS conc={} done={}/{} cached={}",
+                    status["conc"], done, status["prog"]["pages"], cached)));
+            }
+            book.status = status;
+        }
     }
+    if let Some((path, message)) = report { lifecycle_log(&app, window.label(), &message, &path); }
     publish_background(&app);
 }
 
@@ -245,6 +272,17 @@ fn set_book_parallelism(app: AppHandle, count: usize) -> Result<(), String> {
     wake_engines(&app);
     Ok(())
 }
+// Rust 保留最新设置意图，面板启动/收到快照时统一写入共享 localStorage。
+#[tauri::command]
+fn set_request_concurrency(app: AppHandle, count: usize) -> Result<(), String> {
+    if ![6, 8, 10, 12, 16, 20, 24, 30].contains(&count) {
+        return Err("请求并发只能选 6/8/10/12/16/20/24/30".into());
+    }
+    app.state::<PendingJobs>().0.lock().unwrap().request_concurrency = Some(count);
+    publish_background(&app);
+    Ok(())
+}
+
 
 #[tauri::command]
 fn background_pause(app: AppHandle) {
@@ -514,6 +552,7 @@ fn main() {
             background_state,
             background_pause,
             set_book_parallelism,
+            set_request_concurrency,
             recent_init,
             recent_imported,
             bg_pick,
@@ -532,7 +571,7 @@ fn main() {
             let recent = settings_path(app.handle(), "background-recent.json")
                 .and_then(|p| std::fs::read(p).ok()).and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
             app.manage(PendingJobs(Mutex::new(BackgroundState {
-                queue: VecDeque::new(), running: HashMap::new(), recent, parallelism, paused: false,
+                queue: VecDeque::new(), running: HashMap::new(), recent, parallelism, paused: false, request_concurrency: None,
             })));
             // Zotero 交来的链接：程序已经开着时走这里
             let h = app.handle().clone();
