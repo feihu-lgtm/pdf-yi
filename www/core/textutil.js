@@ -138,14 +138,19 @@ function groupRaw(lines,ys){
   return {texts:texts,bboxes:bboxes}}
 function getMsgContent(d){var c=d&&d.choices&&d.choices[0]&&d.choices[0].message?d.choices[0].message.content:'';if(c==null)return '';return typeof c==='string'?c:JSON.stringify(c)}
 function getFinishReason(d){return d&&d.choices&&d.choices[0]?(d.choices[0].finish_reason||''):''}
-function _wrap(text,font,size,maxW){
+function _wrap(text,font,size,maxW,firstW){
   var toks=String(text).match(_BREAK_TOK)||[],lines=[],cur='',w=function(t){try{return font.widthOfTextAtSize(t,size)}catch(e){return t.length*size}};
+  var lim=function(){return lines.length||firstW==null?maxW:firstW};
   toks.forEach(function(t){
     if(/^\s+$/.test(t)){if(cur)cur+=' ';return}
-    if(w(cur+t)<=maxW||!cur.trim()||(_NO_START.test(t)&&w(cur+t)<=maxW*1.06)){
-      if(!cur.trim()&&w(t)>maxW){// 一个词比一行还长：硬切
-        var buf='';Array.from(t).forEach(function(ch){if(w(buf+ch)>maxW&&buf){lines.push(buf);buf=''}buf+=ch});cur=buf;return}
+    var L=lim();
+    if(w(cur+t)<=L||!cur.trim()||(_NO_START.test(t)&&w(cur+t)<=L*1.06)){
+      if(!cur.trim()&&w(t)>L){// 一个词比一行还长：硬切
+        var buf='';Array.from(t).forEach(function(ch){if(w(buf+ch)>lim()&&buf){lines.push(buf);buf=''}buf+=ch});cur=buf;return}
       cur+=t;return}
-    lines.push(cur.replace(/\s+$/,''));cur=t});
+    // 避头：句号逗号这类放不下时，把上一行最后一个汉字（或最后一个西文词）一起带到下一行，不让标点单独起行
+    var cr=cur.replace(/\s+$/,''),mm=_NO_START.test(t)&&cr.match(/^(.*?)((?:[\u2e80-\u9fff\uf900-\ufaff]|[^\s\u2e80-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef]+)[，。、；：！？）」』》〉】,.;:!?)\]…—’”%]*)$/);
+    if(mm&&mm[1].trim()){lines.push(mm[1].replace(/\s+$/,''));cur=mm[2]+t;return}
+    lines.push(cr);cur=t});
   if(cur.trim())lines.push(cur.replace(/\s+$/,''));
   return lines}
