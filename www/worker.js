@@ -41,7 +41,7 @@ var BAR_KINDS=[['pct','百分比（40%）'],['pages','页数（12/30）'],['eta'
 var bar={top:lsGet('pdfyi_bar_top','pct'),bottom:lsGet('pdfyi_bar_bottom','eta'),face:lsGet('pdfyi_bar_face','1')!=='0',sym:lsGet('pdfyi_bar_sym','1')!=='0',fail:lsGet('pdfyi_bar_fail','1')!=='0'};
 
 // ══ 任务队列 ══
-var queue=[],job=null,paused=false,lastOut=null,running=[],parallelism=2,pulling=false,completedResult=null,doneTimer=null,cachedPages=0;
+var queue=[],job=null,paused=false,lastOut=null,running=[],parallelism=2,pulling=false,completedResult=null,doneTimer=null,cachedPages=0,dirtyCachePages=0;
 var prog={pages:0,done:0,failPages:0,failParas:0,doneTimes:[],phase:'idle',doneUntil:0,title:'',from:''};
 var pageState=[];// 每页：w 排队、t 正在翻、d 翻好、f 有失败、u 读不出字、e 没有正文
 var recent=[];try{recent=JSON.parse(lsGet('pdfyi_recent','[]'))||[]}catch(e){recent=[]}
@@ -49,7 +49,7 @@ async function next(){
   if(!engine||!T||job||pulling)return;pulling=true;var claimed=false;
   try{
     var j=await T.core.invoke('engine_pull');if(!j)return;
-    claimed=true;job=j;completedResult=null;cachedPages=0;
+    claimed=true;job=j;completedResult=null;cachedPages=0;dirtyCachePages=0;
     prog={pages:0,done:0,failPages:0,failParas:0,doneTimes:[],phase:'loading',doneUntil:0,title:baseOf(j.path),from:j.key?'来自 Zotero':'本地文件'};pageState=[];refresh();
     try{await run(j)}
     catch(e){addTransLog('-','',baseOf(j.path)+' 没翻成：'+(e&&e.message||e),'magpie','任务',false);notify('这一本没翻成',baseOf(j.path)+'：'+(e&&e.message||e))}
@@ -76,10 +76,11 @@ async function run(j){
   pageState=[];for(var i=0;i<=totalPages;i++)pageState.push('w');refresh();
   // 已有的缓存（全量版翻过的也算）
   for(var p=1;p<=totalPages;p++){var v=await idbGet('pages',cacheKey+':p'+p);
-    if(v&&Array.isArray(v)&&v.length&&!v.some(function(t){return String(t).indexOf('__TRANSFAIL__')===0})){
+    if(v&&Array.isArray(v)&&v.length){
+      if(v.some(function(t){return String(t).indexOf('__TRANSFAIL__')===0})){dirtyCachePages++;continue}
       memCache[p]=v;cachedAtLoad[p]=1;
       var se=await idbGet('pages',cacheKey+':en'+p);if(se&&Array.isArray(se.texts)&&se.texts.length===v.length)savedEnCache[p]=se}}
-  cachedPages=Object.keys(cachedAtLoad).length;log('缓存复用 '+cachedPages+' 页（共 '+totalPages+' 页）');refresh();
+  cachedPages=Object.keys(cachedAtLoad).length;log('缓存复用 '+cachedPages+' 页，重翻 '+dirtyCachePages+' 页失败缓存（共 '+totalPages+' 页）');refresh();
   // 清理规则：用这本书确认过的；没有就自动识别（隐藏页眉页脚），并存下来，全量版打开时也按它来
   var saved=await idbGet('annotations',cacheKey+':clean');
   if(saved&&saved.running)cleanRules=saved;
@@ -88,16 +89,9 @@ async function run(j){
   // 术语表（全书译名统一）；最多等 90 秒，没提取成也照常翻
   try{await Promise.race([buildGlossary(),new Promise(function(r){setTimeout(r,90000)})]);if(_glossary.length)log('术语表 '+_glossary.length+' 条')}catch(e){}
   // 逐页：并发按设置，暂停时不再取新页
-  var order=[];for(var q=1;q<=totalPages;q++)order.push(q);var pos=0,active=0;
-  await new Promise(function(resolve){
-    function pump(){
-      if(pos>=order.length&&active===0){resolve();return}
-      while(!paused&&active<getConc()&&pos<order.length){(function(pn){active++;pageState[pn]='t';
-        onePage(pn).catch(function(e){addTransLog(pn,'',String(e&&e.message||e),'magpie','翻译',false);prog.failPages++;pageState[pn]='f'})
-          .finally(function(){active--;prog.done++;prog.doneTimes.push(Date.now());if(prog.doneTimes.length>30)prog.doneTimes.shift();if(pageState[pn]==='t')pageState[pn]='d';refresh();pump()})})(order[pos++])}
-      refresh();
-      if(paused&&active===0)waitResume(pump)}
-    pump()});
+  var order=[];for(var q=1;q<=totalPages;q++)order.push(q);
+  await processPages(order,onePage,true);
+  await retryTransientFailures();
   // 生成并保存
   prog.phase='building';refresh();
   var pdf=await buildBilingualPdf();
@@ -138,6 +132,41 @@ async function onePage(p){
   savedEnCache[p]=enRec;
   await idbSet('pages',ck+':p'+p,tr);await idbSet('pages',ck+':en'+p,enRec)}
 function countFails(p,arr){var f=arr.filter(function(t){return String(t).indexOf('__TRANSFAIL__')===0}).length;if(f){prog.failPages++;prog.failParas+=f;pageState[p]='f'}}
+function isTransientFailure(value){
+  var text=String(value||'');
+  return text.indexOf('__TRANSFAIL__')===0&&/网络错误|Load failed|Failed to fetch|NetworkError|超时|timeout|timed out|HTTP\s*(?:429|5\d\d)\b|ECONNRESET|ECONNREFUSED|ENETUNREACH/i.test(text)}
+function transientPages(){
+  var pages=[];for(var p=1;p<=totalPages;p++)if(memCache[p]&&memCache[p].some(isTransientFailure))pages.push(p);
+  return pages}
+async function processPages(order,work,firstPass){
+  var pos=0,active=0;
+  await new Promise(function(resolve){
+    function pump(){
+      if(pos>=order.length&&active===0){resolve();return}
+      while(!paused&&active<getConc()&&pos<order.length){(function(pn){active++;pageState[pn]='t';
+        work(pn).catch(function(e){addTransLog(pn,'',String(e&&e.message||e),'magpie','翻译',false);if(firstPass)prog.failPages++;pageState[pn]='f'})
+          .finally(function(){active--;if(firstPass){prog.done++;prog.doneTimes.push(Date.now());if(prog.doneTimes.length>30)prog.doneTimes.shift()}
+            if(pageState[pn]==='t')pageState[pn]='d';refresh();pump()})})(order[pos++])}
+      refresh();if(paused&&active===0)waitResume(pump)}
+    pump()})}
+async function retryOnePage(p){
+  var ck=cacheKey,previous=memCache[p],ids=[];
+  previous.forEach(function(value,i){if(isTransientFailure(value))ids.push(i)});
+  var translated=await translatePage(p,ids.map(function(i){return pageTextCache[p][i]}));
+  if(!translated||cacheKey!==ck)return;
+  var next=previous.slice();ids.forEach(function(i,j){if(translated[j]!==undefined)next[i]=translated[j]});
+  var before=previous.filter(function(t){return String(t).indexOf('__TRANSFAIL__')===0}).length;
+  var after=next.filter(function(t){return String(t).indexOf('__TRANSFAIL__')===0}).length;
+  memCache[p]=next;prog.failParas+=after-before;prog.failPages+=(after?1:0)-(before?1:0);
+  pageState[p]=after?'f':'d';await idbSet('pages',ck+':p'+p,next)}
+async function retryTransientFailures(){
+  for(var round=1;round<=2;round++){
+    var pages=transientPages();if(!pages.length)return;
+    prog.phase='retrying';prog.retryRound=round;refresh();
+    await new Promise(function(resolve){setTimeout(resolve,2000*Math.pow(2,round-1))});
+    var before=prog.failParas;await processPages(pages,retryOnePage,false);
+    log('自动重试第 '+round+'/2 轮：'+pages.length+' 页，失败段落 '+before+' → '+prog.failParas+'，仍有 '+transientPages().length+' 页暂时错误');
+  }}
 
 // ══ 保存：Zotero 交来的照原附件方式挂回；其余存到原文件旁边 ══
 async function saveOut(j,bytes){
@@ -208,7 +237,7 @@ async function pushTray(){
       await T.core.invoke('tray_update',{state:st}).catch(function(){})}while(trayAgain)}
   finally{trayBusy=false}}
 function refresh(){
-  if(engine){if(T&&job)T.core.invoke('engine_progress',{status:{prog:prog,pageState:pageState,conc:getConc(),cachedPages:cachedPages}}).catch(function(){});return}
+  if(engine){if(T&&job)T.core.invoke('engine_progress',{status:{prog:prog,pageState:pageState,conc:getConc(),cachedPages:cachedPages,dirtyCachePages:dirtyCachePages,retryRound:prog.retryRound||0}}).catch(function(){});return}
   renderNow();pushTray()}
 
 // ══ 面板：现在 ══
@@ -224,7 +253,7 @@ function bookCard(book){
     tiles+='<i class="tile '+st+'" title="第 '+(c*group+1)+(group>1?'–'+Math.min(n,(c+1)*group):'')+' 页"></i>'}
   return '<div class="book"><div class="book-title">'+esc(p.title||baseOf(book.job.path))+'</div><div class="book-from">'+esc(p.from||'本地文件')+'，每本请求并发 '+(book.status.conc||6)+'</div>'
     +'<div class="tiles" style="--ts:'+ts+'px">'+tiles+'</div><div class="stats"><span class="big">'+(p.done||0)+'<small>/ '+n+' 页</small></span>'
-    +'<span class="chip">'+(p.phase==='building'?'正在生成双栏 PDF':p.phase==='loading'?'正在读取 PDF':paused?'已暂停':eta||'正在翻译')+'</span>'
+    +'<span class="chip">'+(p.phase==='building'?'正在生成双栏 PDF':p.phase==='loading'?'正在读取 PDF':paused?'已暂停':p.phase==='retrying'?'自动重试第 '+p.retryRound+'/2 轮':eta||'正在翻译')+'</span>'
     +(p.failPages?'<span class="chip bad">'+p.failPages+' 页有失败段落（'+(p.failParas||0)+' 段）</span>':'')+'</div></div>'}
 function renderNow(){
   if(!$('job'))return;

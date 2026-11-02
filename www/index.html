@@ -360,6 +360,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PDF译·终极版</title>
 <script>window.PDFYI_VENDOR='vendor/';window.PDFYI_APP=true;</script>
+<script src="model-http.js"></script>
 <script src="vendor/pdf.min.js"></script>
 <script src="vendor/mammoth.browser.min.js"></script>
 <script src="vendor/jszip.min.js"></script>
@@ -1353,6 +1354,7 @@ async function copyTransLog(){
 // ══ v36：发给模型的请求统一重试一次（5xx / 超时 / 网络错误 / 返回不是完整 JSON） ══
 (function(){
   var _f=window.fetch.bind(window);
+  var timeoutSeconds=window.PDFYI_NATIVE_HTTP?300:180;
   function isLLM(u,o){var url=String((u&&u.url)||u||'');return !!o&&String(o.method||'').toUpperCase()==='POST'&&/chat\/completions|chatcompletion_v2/.test(url)}
   // 把读出来的正文重新包成响应交给调用方；个别环境没有 Response 时用一个简单对象代替
   function mk(t,r){if(typeof Response==='function')return new Response(t,{status:r.status,statusText:r.statusText,headers:r.headers});
@@ -1366,7 +1368,7 @@ async function copyTransLog(){
     var why='';
     for(var attempt=1;attempt<=2;attempt++){
       var own=null,tm=null,opts=o;
-      if(!o.signal){own=new AbortController();tm=setTimeout(function(){own.abort()},180000);opts=Object.assign({},o,{signal:own.signal})}
+      if(!o.signal){own=new AbortController();tm=setTimeout(function(){own.abort()},timeoutSeconds*1000);opts=Object.assign({},o,{signal:own.signal})}
       try{
         var r=await _f(u,opts);
         var t=await r.text();
@@ -1378,8 +1380,8 @@ async function copyTransLog(){
           throw new Error(why)}
       }catch(e){
         if(o.signal&&o.signal.aborted)throw e;// 调用方自己取消的，不重试
-        if(attempt===2){if(why&&e.message===why)throw e;why=(e&&e.name==='AbortError')?'超时（180 秒）':'网络错误 '+((e&&e.message)||e);addTransLog('?','',why+'，重试后仍失败',activeModel,'重试',false);throw new Error(why)}
-        why=(e&&e.name==='AbortError')?'超时（180 秒）':'网络错误 '+((e&&e.message)||e);
+        if(attempt===2){if(why&&e.message===why)throw e;why=(e&&(e.name==='AbortError'||e.name==='TimeoutError'))?'超时（'+timeoutSeconds+' 秒）':'网络错误 '+((e&&e.message)||e);addTransLog('?','',why+'，重试后仍失败',activeModel,'重试',false);throw new Error(why)}
+        why=(e&&(e.name==='AbortError'||e.name==='TimeoutError'))?'超时（'+timeoutSeconds+' 秒）':'网络错误 '+((e&&e.message)||e);
       }finally{if(tm)clearTimeout(tm)}
       addTransLog('?','',why+'，1 秒后重试一次',activeModel,'重试',false);
       if(!window.PDFYI_WORKER)await new Promise(function(res){setTimeout(res,1000)});// 后台引擎里直接重试，不等计时器
@@ -2840,7 +2842,7 @@ async function scanBookStructure(opt){
   if(!cfg.chatUrl)throw new Error('还没有设置模型端点');
   async function ask(kind,prompt){
     var body=cfg.chatBody(prompt,8192);body.temperature=0;
-    var ctl=new AbortController(),tm=setTimeout(function(){ctl.abort()},150000),raw='';
+    var ctl=new AbortController(),tm=setTimeout(function(){ctl.abort()},window.PDFYI_NATIVE_HTTP?300000:150000),raw='';
     try{
       var ck=(cfg.key||'').replace(/[^\x20-\x7E]/g,'').trim();
       var resp=await fetch(cfg.chatUrl,{method:'POST',headers:new Headers({'Content-Type':'application/json','Authorization':'Bearer '+ck}),body:JSON.stringify(body),signal:ctl.signal});
@@ -4437,7 +4439,7 @@ async function apiBatch(apiKey,texts,pageNum){
     var ck=apiKey.replace(/[^\x20-\x7E]/g,'').trim();var blob=new Blob([JSON.stringify(body)],{type:'application/json'});var h=new Headers();h.append('Authorization','Bearer '+ck);
     var resp=await fetch(url,{method:'POST',headers:h,body:blob});
     if(cacheKey!==myKey)return [];
-    if(!resp.ok){var err=await resp.json().catch(function(){return{}});if(cacheKey!==myKey)return [];var emsg=err.error&&err.error.message?err.error.message:('HTTP '+resp.status);toast('API error: '+emsg,'err');setStatus('error');addTransLog(pageNum,prompt,emsg,activeModel,'翻译',false);return texts.map(function(){return FAIL+emsg})}
+    if(!resp.ok){var err=await resp.json().catch(function(){return{}});if(cacheKey!==myKey)return [];var emsg=err.error&&err.error.message?err.error.message:('HTTP '+resp.status);toast('API error: '+emsg,'err');setStatus('error');addTransLog(pageNum,prompt,emsg,activeModel,'翻译',false);return texts.map(function(){return FAIL+'HTTP '+resp.status+' '+emsg})}
     var data=await resp.json();if(cacheKey!==myKey)return [];var raw=getMsgContent(data); addTransLog(pageNum,body.messages[0].content,raw,activeModel,'翻译',true);
     var results=[];for(var i=0;i<texts.length;i++){var m=raw.match(new RegExp('\\['+(i+1)+'\\]\\s*([\\s\\S]*?)(?=\\s*\\['+(i+2)+'\\]|$)'));results.push(m&&m[1]?m[1].trim():FAIL+(raw?'未匹配到译文（模型返回格式异常）':'模型返回空内容'))}
     if(getFinishReason(data)==='length'){var li=-1;for(var k=results.length-1;k>=0;k--){if(results[k].indexOf(FAIL)!==0){li=k;break}}

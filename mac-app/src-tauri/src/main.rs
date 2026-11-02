@@ -63,6 +63,72 @@ struct BackgroundState {
 }
 
 struct PendingJobs(Mutex<BackgroundState>);
+
+// One shared pool across reader and engines; idle pooling never limits active requests.
+struct ModelHttp(ureq::Agent);
+
+#[derive(serde::Deserialize)]
+struct ModelHttpRequest {
+    url: String,
+    method: String,
+    headers: Vec<(String, String)>,
+    body: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelHttpResponse {
+    status: u16,
+    status_text: String,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+#[tauri::command]
+async fn model_http(
+    window: tauri::WebviewWindow,
+    client: tauri::State<'_, ModelHttp>,
+    request: ModelHttpRequest,
+) -> Result<ModelHttpResponse, String> {
+    if !matches!(window.label(), "main" | "worker" | "engine-1" | "engine-2" | "engine-3" | "engine-4") {
+        return Err("原生模型请求只允许内嵌窗口调用".into());
+    }
+    let origin = window.url().map_err(|e| e.to_string())?;
+    if !((origin.scheme() == "tauri" && origin.host_str() == Some("localhost"))
+        || (matches!(origin.scheme(), "http" | "https") && origin.host_str() == Some("tauri.localhost"))) {
+        return Err("原生模型请求不允许远程页面调用".into());
+    }
+    let url = tauri::Url::parse(&request.url).map_err(|e| e.to_string())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
+        || !url.username().is_empty() || url.password().is_some() {
+        return Err("模型端点必须是普通 HTTP 或 HTTPS URL".into());
+    }
+    if !matches!(request.method.as_str(), "GET" | "POST") {
+        return Err("模型请求只支持 GET 或 POST".into());
+    }
+    let agent = client.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut http = agent.request(&request.method, url.as_str());
+        for (name, value) in &request.headers { http = http.set(name, value); }
+        let response = match match request.body {
+            Some(body) => http.send_string(&body),
+            None => http.call(),
+        } {
+            Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+            Err(error) => return Err(format!("原生模型 HTTP 请求失败：{error}")),
+        };
+        let status = response.status();
+        let status_text = response.status_text().to_owned();
+        let mut headers = Vec::new();
+        for name in response.headers_names() {
+            // ureq decodes the body; do not attach stale wire-encoding/length headers.
+            if matches!(name.as_str(), "content-encoding" | "content-length") { continue; }
+            for value in response.all(&name) { headers.push((name.clone(), value.to_owned())); }
+        }
+        let body = response.into_string().map_err(|e| format!("读取原生模型响应失败：{e}"))?;
+        Ok(ModelHttpResponse { status, status_text, headers, body })
+    }).await.map_err(|e| e.to_string())?
+}
 static LINK_LAUNCH: AtomicBool = AtomicBool::new(false);
 static STARTUP_PENDING: AtomicBool = AtomicBool::new(true);
 #[cfg(target_os = "macos")]
@@ -221,11 +287,13 @@ fn engine_progress(app: AppHandle, window: tauri::WebviewWindow, status: serde_j
             let before = book.status["prog"]["done"].as_u64().unwrap_or(0);
             let cached = status["cachedPages"].as_u64().unwrap_or(0);
             if status["conc"] != book.status["conc"] || status["cachedPages"] != book.status["cachedPages"]
+                || status["dirtyCachePages"] != book.status["dirtyCachePages"]
+                || status["retryRound"] != book.status["retryRound"]
                 || status["prog"]["phase"] != book.status["prog"]["phase"]
                 || (done > before && (before == 0 || done == cached || done % 24 == 0))
             {
-                report = Some((book.job.path.clone(), format!("PROGRESS conc={} done={}/{} cached={}",
-                    status["conc"], done, status["prog"]["pages"], cached)));
+                report = Some((book.job.path.clone(), format!("PROGRESS conc={} done={}/{} failedPages={} failedParas={} cached={} dirtyCachePages={} retryRound={}",
+                    status["conc"], done, status["prog"]["pages"], status["prog"]["failPages"], status["prog"]["failParas"], cached, status["dirtyCachePages"], status["retryRound"])));
             }
             book.status = status;
         }
@@ -234,8 +302,37 @@ fn engine_progress(app: AppHandle, window: tauri::WebviewWindow, status: serde_j
     publish_background(&app);
 }
 
+fn log_field(value: &str, limit: usize) -> String {
+    value.chars().take(limit).map(|c| if c.is_control() || c.is_whitespace() { ' ' } else { c }).collect()
+}
+
 #[tauri::command]
 fn engine_log(app: AppHandle, window: tauri::WebviewWindow, entry: serde_json::Value) {
+    if entry["ok"].as_bool() == Some(false) {
+        let book = {
+            let state = app.state::<PendingJobs>();
+            let s = state.0.lock().unwrap();
+            s.running.get(window.label()).map(|book| {
+                std::path::Path::new(&book.job.path).file_stem().unwrap_or_default().to_string_lossy().into_owned()
+            }).unwrap_or_default()
+        };
+        let page = entry["page"].as_str().map(str::to_owned).unwrap_or_else(|| entry["page"].to_string());
+        let message = entry["msg"].as_str().or_else(|| entry["message"].as_str())
+            .or_else(|| entry["output"].as_str()).unwrap_or("");
+        let line = format!("{}\n", serde_json::json!({
+            "timestamp": now_ms(), "engine": window.label(), "book": log_field(&book, usize::MAX),
+            "page": log_field(&page, usize::MAX),
+            "type": log_field(entry["type"].as_str().unwrap_or(""), usize::MAX),
+            "message": log_field(message, 300),
+        }));
+        let saved = (|| -> std::io::Result<()> {
+            let dir = app.path().app_log_dir().map_err(|e| std::io::Error::other(e.to_string()))?;
+            std::fs::create_dir_all(&dir)?;
+            std::fs::OpenOptions::new().create(true).append(true).open(dir.join("failures.log"))?
+                .write_all(line.as_bytes())
+        })();
+        if let Err(error) = saved { eprintln!("写入 failures.log 失败：{error}"); }
+    }
     let _ = app.emit_to("worker", "engine-log", serde_json::json!({ "engine": window.label(), "entry": entry }));
 }
 
@@ -543,12 +640,14 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
+        .manage(ModelHttp(ureq::AgentBuilder::new().timeout(Duration::from_secs(300)).build()))
         .invoke_handler(tauri::generate_handler![
             tray_update,
             engine_pull,
             engine_progress,
             engine_finish,
             engine_log,
+            model_http,
             background_state,
             background_pause,
             set_book_parallelism,

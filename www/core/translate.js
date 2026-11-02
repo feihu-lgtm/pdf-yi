@@ -16,6 +16,7 @@ var _glossary=[];
     return {ok:r.status>=200&&r.status<300,status:r.status,statusText:r.statusText||'',headers:r.headers,text:function(){return Promise.resolve(t)},json:function(){return Promise.resolve().then(function(){return JSON.parse(t)})}}}
   function errMsg(t){try{var j=JSON.parse(t);if(j&&j.error)return j.error.message||JSON.stringify(j.error)}catch(e){}return String(t||'').slice(0,200)}
   var _nextSlot=0;// v48：发给模型的请求之间至少隔 200 毫秒
+  var timeoutMs=window.PDFYI_NATIVE_HTTP?300000:180000;
   window.fetch=async function(u,o){
     if(!isLLM(u,o))return _f(u,o);
     var now=Date.now(),wait=Math.max(0,_nextSlot-now);_nextSlot=Math.max(now,_nextSlot)+200;
@@ -23,7 +24,7 @@ var _glossary=[];
     var why='';
     for(var attempt=1;attempt<=2;attempt++){
       var own=null,tm=null,opts=o;
-      if(!o.signal){own=new AbortController();tm=setTimeout(function(){own.abort()},180000);opts=Object.assign({},o,{signal:own.signal})}
+      if(!o.signal){own=new AbortController();tm=setTimeout(function(){own.abort()},timeoutMs);opts=Object.assign({},o,{signal:own.signal})}
       try{
         var r=await _f(u,opts);
         var t=await r.text();
@@ -35,8 +36,8 @@ var _glossary=[];
           throw new Error(why)}
       }catch(e){
         if(o.signal&&o.signal.aborted)throw e;// 调用方自己取消的，不重试
-        if(attempt===2){if(why&&e.message===why)throw e;why=(e&&e.name==='AbortError')?'超时（180 秒）':'网络错误 '+((e&&e.message)||e);addTransLog('?','',why+'，重试后仍失败',activeModel,'重试',false);throw new Error(why)}
-        why=(e&&e.name==='AbortError')?'超时（180 秒）':'网络错误 '+((e&&e.message)||e);
+        if(attempt===2){if(why&&e.message===why)throw e;why=(e&&(e.name==='AbortError'||e.name==='TimeoutError'))?'超时（'+timeoutMs/1000+' 秒）':'网络错误 '+((e&&e.message)||e);addTransLog('?','',why+'，重试后仍失败',activeModel,'重试',false);throw new Error(why)}
+        why=(e&&(e.name==='AbortError'||e.name==='TimeoutError'))?'超时（'+timeoutMs/1000+' 秒）':'网络错误 '+((e&&e.message)||e);
       }finally{if(tm)clearTimeout(tm)}
       addTransLog('?','',why+'，1 秒后重试一次',activeModel,'重试',false);
       if(!window.PDFYI_WORKER)await new Promise(function(res){setTimeout(res,1000)});// 后台引擎里直接重试，不等计时器
@@ -167,7 +168,7 @@ async function apiBatch(apiKey,texts,pageNum){
     var ck=apiKey.replace(/[^\x20-\x7E]/g,'').trim();var blob=new Blob([JSON.stringify(body)],{type:'application/json'});var h=new Headers();h.append('Authorization','Bearer '+ck);
     var resp=await fetch(url,{method:'POST',headers:h,body:blob});
     if(cacheKey!==myKey)return [];
-    if(!resp.ok){var err=await resp.json().catch(function(){return{}});if(cacheKey!==myKey)return [];var emsg=err.error&&err.error.message?err.error.message:('HTTP '+resp.status);toast('API error: '+emsg,'err');setStatus('error');addTransLog(pageNum,prompt,emsg,activeModel,'翻译',false);return texts.map(function(){return FAIL+emsg})}
+    if(!resp.ok){var err=await resp.json().catch(function(){return{}});if(cacheKey!==myKey)return [];var emsg='HTTP '+resp.status+' '+(err.error&&err.error.message?err.error.message:'请求失败');toast('API error: '+emsg,'err');setStatus('error');addTransLog(pageNum,prompt,emsg,activeModel,'翻译',false);return texts.map(function(){return FAIL+emsg})}
     var data=await resp.json();if(cacheKey!==myKey)return [];var raw=getMsgContent(data); addTransLog(pageNum,body.messages[0].content,raw,activeModel,'翻译',true);
     var results=[];for(var i=0;i<texts.length;i++){var m=raw.match(new RegExp('\\['+(i+1)+'\\]\\s*([\\s\\S]*?)(?=\\s*\\['+(i+2)+'\\]|$)'));results.push(m&&m[1]?m[1].trim():FAIL+(raw?'未匹配到译文（模型返回格式异常）':'模型返回空内容'))}
     if(getFinishReason(data)==='length'){var li=-1;for(var k=results.length-1;k>=0;k--){if(results[k].indexOf(FAIL)!==0){li=k;break}}
