@@ -2532,7 +2532,7 @@ dependencies = [
 
 [[package]]
 name = "pdf-yi"
-version = "0.64.2"
+version = "0.65.0"
 dependencies = [
  "block2",
  "objc2",
@@ -2547,6 +2547,7 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
+ "tokio",
  "ureq",
 ]
 

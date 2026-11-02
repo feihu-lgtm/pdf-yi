@@ -108,13 +108,14 @@ async function aiMergeLines(rawLines,apiKey){
   for(var i=0;i<rawLines.length;i++){
     if(rawLines[i].trim()){numbered.push('['+(numbered.length+1)+'] '+rawLines[i]);lineMap.push(i)}}
   if(numbered.length===0)return[];
-  if(numbered.length===1)return[rawLines[lineMap[0]]];
-  var prompt='Below are numbered text lines extracted from a PDF page.\n'
+  if(numbered.length===1){var single=[rawLines[lineMap[0]]];single._idx=[[lineMap[0]]];return single}
+  var prompt='Below are numbered text lines extracted from PDF pages.\n'
     +'Your task: group consecutive lines that belong to the same paragraph.\n'
     +'Rules:\n'
     +'- A line break is a SOFT WRAP (same paragraph) if the previous line does not end a sentence and the text flows naturally.\n'
     +'- A line break is a PARAGRAPH BREAK if: (1) previous line ends with sentence-ending punctuation AND next line starts a new thought, OR (2) there is a clear topic/section shift.\n'
     +'- Short lines like headings, figure captions, or standalone labels are their own paragraph.\n'
+    +(rawLines._pageStarts?'Page boundaries (never group lines from different pages): '+rawLines._pageStarts.map(function(s){return 'page '+s.page+' begins at ['+s.line+']'}).join('; ')+'.\n':'')
     +'Return ONLY a JSON array of arrays, where each inner array contains the line numbers belonging to one paragraph.\n'
     +'Example: [[1,2,3],[4],[5,6,7,8]]\n'
     +'No explanation, no markdown, only the JSON.\n\n'
@@ -134,9 +135,9 @@ async function aiMergeLines(rawLines,apiKey){
     if(a0<0||a1<=a0)throw new Error('no json array');
     var groups=JSON.parse(clean.slice(a0,a1+1));
     if(!Array.isArray(groups))throw new Error('bad json');
-    // v33：校验覆盖——任何一行没被分进组，整页回退规则分段，避免静默丢句
-    var covered={};groups.forEach(function(g){if(Array.isArray(g))g.forEach(function(n){n=parseInt(n);if(n>=1&&n<=numbered.length)covered[n]=1})});
-    if(Object.keys(covered).length<numbered.length)throw new Error('合并结果遗漏 '+(numbered.length-Object.keys(covered).length)+' 行');
+    // 覆盖、唯一性和顺序同时校验；漏行、重行或乱序一律走原有版面回退。
+    var sequence=[];groups.forEach(function(g){if(!Array.isArray(g))throw new Error('bad group');g.forEach(function(n){sequence.push(Number(n))})});
+    if(sequence.length!==numbered.length||sequence.some(function(n,i){return n!==i+1}))throw new Error('合并结果遗漏、重复或乱序');
     var result=[],idxGroups=[],rawG=[];
     groups.forEach(function(g){
       if(!Array.isArray(g)||g.length===0)return;
@@ -177,6 +178,11 @@ async function apiBatch(apiKey,texts,pageNum){
 // 翻译一页：中文段落原样保留；按字数分批（约 3000 字符、最多 24 段）；没翻好的对半拆开重翻，最多三层
 async function translatePage(p,paras,onBatch){
   var apiKey=getKey(),BUDGET=3000,MAXN=24,results=new Array(paras.length),need=[],ck0=cacheKey;
+  if(paras.some(function(t){return !_isZhPara(t)&&String(t).length>BUDGET})){
+    var joined=null;
+    await translateBook([{page:p,texts:paras}],{schedule:async function(batches,work){for(var batch of batches){await work(batch);if(onBatch)onBatch()}},onPage:async function(_,values){joined=values}});
+    return joined;
+  }
   paras.forEach(function(t,i){if(_isZhPara(t))results[i]=t;else need.push(i)});
   var batches=[],cur=[],len=0;
   need.forEach(function(k){var L=String(paras[k]).length;if(cur.length&&(len+L>BUDGET||cur.length>=MAXN)){batches.push(cur);cur=[];len=0}cur.push(k);len+=L});
@@ -196,3 +202,53 @@ async function translatePage(p,paras,onBatch){
   for(var bi=0;bi<batches.length;bi++){if(await runIds(batches[bi],0)===false)return null;if(onBatch)onBatch()}
   for(var ri=0;ri<paras.length;ri++)if(results[ri]===undefined)results[ri]='__TRANSFAIL__结果缺失（批次未返回）';
   return results}
+
+// 整本队列：按阅读顺序跨页装箱。超长段落只拆请求，回写时仍合成原来的一段。
+function packTranslationEntries(entries,budget,maxN){
+  budget=budget||3000;maxN=maxN||24;
+  var batches=[],batch=[],chars=0;
+  entries.forEach(function(entry){
+    var text=String(entry.text),offset=0,part=0;
+    while(offset<text.length){
+      var end=Math.min(text.length,offset+budget);
+      if(end<text.length){var space=text.lastIndexOf(' ',end);if(space>offset+budget/2)end=space+1}
+      var fragment=Object.assign({},entry,{text:text.slice(offset,end),part:part++});
+      if(batch.length&&(chars+fragment.text.length>budget||batch.length>=maxN)){batches.push(batch);batch=[];chars=0}
+      batch.push(fragment);chars+=fragment.text.length;offset=end;
+    }
+  });
+  if(batch.length)batches.push(batch);
+  return batches;
+}
+async function translateBook(pages,options){
+  var entries=[],states={},ck=cacheKey;
+  pages.forEach(function(page){
+    var state=states[page.page]={results:new Array(page.texts.length),parts:[],remaining:0};
+    page.texts.forEach(function(text,index){
+      if(_isZhPara(text)||!String(text).trim())state.results[index]=text;
+      else entries.push({page:page.page,index:index,text:text});
+    });
+  });
+  var batches=packTranslationEntries(entries);
+  batches.forEach(function(batch){batch.forEach(function(entry){states[entry.page].remaining++})});
+  var complete=async function(p){
+    var state=states[p];
+    if(state.remaining||state.saved||cacheKey!==ck)return;
+    state.saved=true;
+    state.parts.forEach(function(parts,index){if(parts){var failed=parts.filter(function(t){return String(t).indexOf('__TRANSFAIL__')===0});state.results[index]=(failed.length?failed:parts).join('\n')}});
+    await options.onPage(Number(p),state.results);
+  };
+  for(var p in states)if(!states[p].remaining)await complete(p);
+  await options.schedule(batches,async function(batch){
+    var first=batch[0].page,last=batch[batch.length-1].page;
+    var translated=await translatePage(first===last?first:first+'–'+last,batch.map(function(entry){return entry.text}));
+    if(!translated||cacheKey!==ck)return;
+    var touched={};
+    batch.forEach(function(entry,i){
+      var state=states[entry.page],parts=state.parts[entry.index]||(state.parts[entry.index]=[]);
+      parts[entry.part]=translated[i]===undefined?'__TRANSFAIL__结果缺失（批次未返回）':translated[i];
+      state.remaining--;touched[entry.page]=true;
+    });
+    for(var p in touched)await complete(p);
+  });
+}

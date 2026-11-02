@@ -1037,12 +1037,12 @@ mark.align-hl{background:color-mix(in srgb,var(--tS) 22%,transparent);color:inhe
   <div class="s-row"><label for="glossary-on">自动术语表</label><input type="checkbox" id="glossary-on" style="accent-color:var(--tJ)"></div>
   <div class="s-row"><label for="bp-cols">双栏论文按栏对照</label><input type="checkbox" id="bp-cols" style="accent-color:var(--tJ)"></div>
   <div class="s-row"><label for="auto-bipdf">翻完自动生成双栏 PDF</label><input type="checkbox" id="auto-bipdf" style="accent-color:var(--tJ)"></div>
-  <div class="s-row" id="conc-row"><label for="conc-select">同时发几个请求</label>
+  <div class="s-row" id="conc-row"><label for="conc-select">同时最多发几个请求（所有书合计）</label>
     <select id="conc-select" style="flex:2;min-width:0;padding:4px;font-size:11px">
-      <option value="6" selected>6（默认）</option><option value="8">8</option><option value="10">10</option><option value="12">12</option><option value="16">16</option><option value="20">20</option><option value="24">24</option><option value="30">30（最快，风险也最大）</option>
+      <option value="6">6</option><option value="8">8</option><option value="12">12</option><option value="16">16</option><option value="24" selected>24（默认）</option><option value="30">30</option><option value="32">32</option><option value="48">48</option><option value="64">64</option>
     </select>
   </div>
-  <div class="s-row" style="font-size:10px;color:var(--mute);line-height:1.5;margin-top:-4px">OCR 清理、段落合并、翻译都按这个数来。越大越快，但同一时间打到账号上的请求也越多。</div>
+  <div class="s-row" style="font-size:10px;color:var(--mute);line-height:1.5;margin-top:-4px">默认 24，范围 6–64。阅读器和所有后台书籍共用一个请求上限，修改立即生效；调低时已发出的请求会先完成，再按新上限继续。</div>
   <div class="s-row"><button id="clear-keys-btn" style="width:100%;padding:6px;background:transparent;border:1px solid var(--border2);color:var(--red,#e05252);cursor:pointer;font-family:var(--font-mono);font-size:11px">清除已保存 Key</button></div>
   <div style="border-top:1px solid var(--border2);margin-top:8px;padding-top:8px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
@@ -1327,11 +1327,41 @@ function getFinishReason(d){return d&&d.choices&&d.choices[0]?(d.choices[0].fini
 // 当前文档的全部页号：PDF/DOCX/EPUB 为 1..N；TXT 真实页号模式为印刷页号序列（可能从 0 或 177 开始）
 function allPageNums(){if(window._realPageOrder)return window._realPageOrder.slice();var a=[];for(var i=1;i<=totalPages;i++)a.push(i);return a}
 function maxPageNum(){var a=allPageNums();return a.length?Math.max.apply(null,a):0}
-// v35：并发数由设置里的“同时发几个请求”决定，默认 6，所有环节共用；不再写死 25 / 50
-function getConc(){var v=6;try{v=parseInt(localStorage.getItem('pdfyi_conc'))||6}catch(e){}return Math.max(6,Math.min(30,v))}
-(function(){var sel=$('conc-select');if(!sel)return;var _c=getConc();try{var _raw=parseInt(localStorage.getItem('pdfyi_conc'));if(_raw&&_raw!==_c)localStorage.setItem('pdfyi_conc',String(_c))}catch(e){}sel.value=String(_c);if(!sel.value)sel.value='6';
-  sel.addEventListener('change',function(){try{localStorage.setItem('pdfyi_conc',sel.value)}catch(e){}CONC=getConc();toast('同时发 '+sel.value+' 个请求，下一批开始生效','ok')});
-  window.addEventListener('storage',function(e){if(e.key==='pdfyi_conc'){sel.value=String(getConc());CONC=getConc()}})})();
+// 阅读器和后台引擎共用原生请求上限，沿用共享的 pdfyi_conc 偏好。
+function getConc(){var v=24;try{v=parseInt(localStorage.getItem('pdfyi_conc'),10)||24}catch(e){}return Math.max(6,Math.min(64,v))}
+(function(){
+  var sel=$('conc-select');if(!sel)return;
+  var T=window.__TAURI__;
+  function applyConc(count,persist){
+    var value=String(count);
+    if(!Array.prototype.some.call(sel.options,function(option){return option.value===value})){
+      var option=document.createElement('option');option.value=value;option.textContent=value;sel.appendChild(option);
+    }
+    sel.value=value;CONC=count;
+    if(persist)try{localStorage.setItem('pdfyi_conc',value)}catch(e){}
+  }
+  function syncNativeConc(){
+    if(!T||!T.core)return Promise.resolve();
+    return T.core.invoke('set_request_concurrency',{count:getConc()}).catch(function(e){toast('同步请求上限失败：'+e,'err')});
+  }
+  applyConc(getConc(),false);
+  sel.addEventListener('change',function(){
+    applyConc(Number(sel.value),true);syncNativeConc();
+    toast('同时最多发 '+sel.value+' 个请求（所有书合计），立即生效','ok');
+  });
+  window.addEventListener('storage',function(e){
+    if(e.key==='pdfyi_conc'){applyConc(getConc(),false);syncNativeConc()}
+  });
+  if(T&&T.core&&T.event){
+    // A startup settings deep link takes precedence over an older local value.
+    T.event.listen('request-concurrency',function(e){applyConc(e.payload,true)})
+      .then(function(){return T.core.invoke('background_state')})
+      .then(function(state){
+        applyConc(state.request_concurrency==null?getConc():state.request_concurrency,true);
+        return syncNativeConc();
+      }).catch(function(e){toast('读取请求上限失败：'+e,'err')});
+  }else{applyConc(getConc(),true);syncNativeConc()}
+})();
 var savedEnCache={};// v33：与译文缓存配套保存的原文分段 {texts,bboxes}
 function escHtml(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function formatTransLogText(){
@@ -3963,7 +3993,7 @@ async function aiMergeLines(rawLines,apiKey){
     return fallback.length?fallback:null}}
 
 // ══ Visible-First Translation Engine ══
-var transQueue=new Set(),transDone=0,transTotal=0,CONC=6,transActive=0,transRunning=false;
+var transQueue=new Set(),transDone=0,transTotal=0,CONC=getConc(),transActive=0,transRunning=false;
 function getVisiblePages(){
   var sc=$('pdf-scroll'),results=[];if(!sc)return results;
   var sTop=sc.scrollTop,sBot=sTop+sc.clientHeight,preTop=sTop-sc.clientHeight,preBot=sBot+sc.clientHeight;

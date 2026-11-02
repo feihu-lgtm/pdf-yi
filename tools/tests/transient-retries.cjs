@@ -24,7 +24,7 @@ function workerContext() {
   const anchor = 'window.PDFYI_WORKER={state:';
   assert.ok(source.includes(anchor), 'worker state seam exists');
   source = source.replace(anchor,
-    'window.retryTest={retryTransientFailures:retryTransientFailures,isTransientFailure:isTransientFailure,processPages:processPages,setStates:function(value){pageState=value}};' + anchor);
+    'window.retryTest={retryTransientFailures:retryTransientFailures,isTransientFailure:isTransientFailure,processRequests:processRequests,setStates:function(value){pageState=value}};' + anchor);
   vm.runInContext(source, context);
   context.addTransLog = (...args) => entries.push(args);
   return { context, delays, writes, entries };
@@ -71,11 +71,11 @@ function workerContext() {
 
   const pool = workerContext().context;
   let active = 0, peak = 0;
-  await pool.retryTest.processPages(Array.from({ length: 14 }, (_, i) => i + 1), async () => {
+  await pool.retryTest.processRequests(Array.from({ length: 70 }, (_, i) => i + 1), async () => {
     active++; peak = Math.max(peak, active);
     await Promise.resolve(); active--;
-  }, false);
-  assert.equal(peak, 6, 'retry pool observes the same live per-book concurrency setting');
+  });
+  assert.equal(peak, 64, 'IPC prefetch is bounded independently of the global native send setting');
 
   const http = vm.createContext({
     console, Headers, Blob, Response, AbortController, setTimeout, clearTimeout,
@@ -124,5 +124,5 @@ function workerContext() {
   lightweight.window = lightweight;
   vm.runInContext(bridgeSource, lightweight);
   assert.equal(lightweight.fetch, browserFetch, 'lightweight browser edition remains unchanged');
-  console.log('PASS: transient classification, two backoff rounds, paragraph preservation, failure totals, concurrency cap, HTTP status markers, native model transport, browser fallback');
+  console.log('PASS: transient classification, two backoff rounds, paragraph preservation, failure totals, bounded IPC prefetch, HTTP status markers, native model transport, browser fallback');
 })().catch(error => { console.error(error); process.exitCode = 1; });

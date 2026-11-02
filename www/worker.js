@@ -32,7 +32,7 @@ window.addEventListener('error',function(e){log('出错：'+(e.message||e),false
 window.addEventListener('unhandledrejection',function(e){log('出错：'+((e.reason&&e.reason.message)||e.reason),false)});
 
 // ══ 设置（和全量版共用的那几项） ══
-function getConc(){var v=6;try{v=parseInt(localStorage.getItem('pdfyi_conc'))||6}catch(e){}return Math.max(6,Math.min(30,v))}
+function getConc(){var v=24;try{v=parseInt(localStorage.getItem('pdfyi_conc'))||24}catch(e){}return Math.max(6,Math.min(64,v))}
 function lsGet(k,d){try{var v=localStorage.getItem(k);return v==null?d:v}catch(e){return d}}
 function lsSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
 var notifyOn=lsGet('pdfyi_notify','1')!=='0';
@@ -72,7 +72,7 @@ async function run(j){
   rawPdfBytes=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
   pdfDoc=await pdfjsLib.getDocument({data:new Uint8Array(rawPdfBytes.slice(0)),cMapUrl:CMAP,cMapPacked:true}).promise;
   totalPages=pdfDoc.numPages;
-  prog={pages:totalPages,done:0,failPages:0,failParas:0,doneTimes:[],phase:'translating',doneUntil:0,title:baseOf(j.path),from:j.key?'来自 Zotero':'本地文件'};
+  prog={pages:totalPages,done:0,failPages:0,failParas:0,doneTimes:[],phase:'segmenting',doneUntil:0,title:baseOf(j.path),from:j.key?'来自 Zotero':'本地文件'};
   pageState=[];for(var i=0;i<=totalPages;i++)pageState.push('w');refresh();
   // 已有的缓存（全量版翻过的也算）
   for(var p=1;p<=totalPages;p++){var v=await idbGet('pages',cacheKey+':p'+p);
@@ -81,16 +81,27 @@ async function run(j){
       memCache[p]=v;cachedAtLoad[p]=1;
       var se=await idbGet('pages',cacheKey+':en'+p);if(se&&Array.isArray(se.texts)&&se.texts.length===v.length)savedEnCache[p]=se}}
   cachedPages=Object.keys(cachedAtLoad).length;log('缓存复用 '+cachedPages+' 页，重翻 '+dirtyCachePages+' 页失败缓存（共 '+totalPages+' 页）');refresh();
+  var phaseAStart=performance.now();
   // 清理规则：用这本书确认过的；没有就自动识别（隐藏页眉页脚），并存下来，全量版打开时也按它来
   var saved=await idbGet('annotations',cacheKey+':clean');
   if(saved&&saved.running)cleanRules=saved;
   else{var au=await autoCleanRules(),v2=await validateCleanRules(null,au.running);
     cleanRules={running:v2.running,refs:null,skip:[],hide:true,from:'后台自动识别'};await idbSet('annotations',cacheKey+':clean',cleanRules)}
-  // 术语表（全书译名统一）；最多等 90 秒，没提取成也照常翻
+  // A：整本先在本地切好；清理、跨页补句、版面段落和框均不调用模型。
+  for(var q=1;q<=totalPages;q++)await preparePage(q);
+  prog.phaseAMs=Math.round(performance.now()-phaseAStart);
+  log('先切后发：本地分段 '+totalPages+' 页，用时 '+prog.phaseAMs+' ms；全局同时最多 '+getConc()+' 个请求');refresh();
+  // B：合并按多页装箱，失败仍用版面细分；之后翻译跨页装满请求。
+  prog.phase='merging';refresh();
+  await mergeBookPages();
   try{await Promise.race([buildGlossary(),new Promise(function(r){setTimeout(r,90000)})]);if(_glossary.length)log('术语表 '+_glossary.length+' 条')}catch(e){}
-  // 逐页：并发按设置，暂停时不再取新页
-  var order=[];for(var q=1;q<=totalPages;q++)order.push(q);
-  await processPages(order,onePage,true);
+  prog.phase='translating';refresh();
+  var pages=[];
+  for(var p=1;p<=totalPages;p++){
+    if(memCache[p]||!pageTextCache[p].length){countFails(p,memCache[p]||[]);finishPage(p)}
+    else pages.push({page:p,texts:pageTextCache[p]});
+  }
+  await translateBook(pages,{schedule:processRequests,onPage:persistPage});
   await retryTransientFailures();
   // 生成并保存
   prog.phase='building';refresh();
@@ -107,13 +118,12 @@ async function run(j){
   notify(out.zotero?'双栏 PDF 已经挂回 Zotero':'双栏 PDF 已存到原文件旁边',baseOf(j.path)+'_双栏，'+totalPages+' 页，'+prog.failParas+' 段失败')}
 var resumeWaiters=[];function waitResume(fn){if(resumeWaiters.indexOf(fn)<0)resumeWaiters.push(fn)}
 function resume(){var w=resumeWaiters;resumeWaiters=[];w.forEach(function(f){f()})}
-async function onePage(p){
-  var ck=cacheKey;
+async function preparePage(p){
   if(memCache[p]){// 已有译文：沿用当时的原文分段
     var se=savedEnCache[p];
     if(se){pageTextCache[p]=se.texts.slice();var r0=await rawOf(p);pageBboxCache[p]=Object.assign({},r0,{texts:se.texts.slice(),bboxes:(se.bboxes&&se.bboxes.length===se.texts.length)?se.bboxes:r0.bboxes.slice()});carryMark[p]=se.carry||''}
     else{var r1=await rawOf(p);pageTextCache[p]=r1.texts.slice();pageBboxCache[p]=Object.assign({},r1,{texts:r1.texts.slice(),bboxes:r1.bboxes.slice()})}
-    countFails(p,memCache[p]);return}
+    return}
   var res=await rawOf(p);
   var q=pageTextQuality(res.rawLines);
   if(q){_pageNotes[p]=q.msg;pageState[p]='u';pageTextCache[p]=[];pageBboxCache[p]=Object.assign({},res,{texts:[],bboxes:[]});addTransLog(p,'',q.msg,'magpie','提取',false);return}
@@ -121,16 +131,68 @@ async function onePage(p){
   pageTextCache[p]=g.texts.slice();
   pageBboxCache[p]=Object.assign({},res,{texts:g.texts.slice(),bboxes:g.bboxes.slice(),rawLines:prep.rawLines,rawYs:prep.rawYs});
   if(!g.texts.length){_pageNotes[p]='这一页只有页眉页脚或页码，没有正文。';pageState[p]='e';return}
-  try{var m2=await aiMergeLines(prep.rawLines,getKey());if(cacheKey!==ck)return;
-    if(m2&&m2.length){pageTextCache[p]=m2;pageBboxCache[p].texts=m2;pageBboxCache[p].bboxes=groupsToBboxes(m2._idx,prep.rawYs)}}
-  catch(e){addTransLog(p,'','合并失败：'+(e.message||e),'magpie','合并',false)}
-  var paras=pageTextCache[p];
-  var tr=await translatePage(p,paras);if(!tr||cacheKey!==ck)return;
+}
+function finishPage(p){
+  prog.done++;prog.doneTimes.push(Date.now());if(prog.doneTimes.length>30)prog.doneTimes.shift();
+  if(pageState[p]==='w'||pageState[p]==='t')pageState[p]='d';refresh();
+}
+async function persistPage(p,tr){
+  var ck=cacheKey,paras=pageTextCache[p],bb=pageBboxCache[p].bboxes;
   memCache[p]=tr;countFails(p,tr);
-  var bb=pageBboxCache[p].bboxes;
   var enRec={texts:paras.slice(),bboxes:(bb&&bb.length===paras.length)?bb:[],carry:carryMark[p]||'',cv:cleanRules&&cleanRules.hide?1:0};
   savedEnCache[p]=enRec;
-  await idbSet('pages',ck+':p'+p,tr);await idbSet('pages',ck+':en'+p,enRec)}
+  await idbSet('pages',ck+':en'+p,enRec);await idbSet('pages',ck+':p'+p,tr);
+  finishPage(p);
+}
+async function mergeBookPages(){
+  var batches=[],batch=[],chars=0,lines=0;
+  for(var p=1;p<=totalPages;p++){
+    if(memCache[p]||!pageTextCache[p].length)continue;
+    var raw=pageBboxCache[p].rawLines,size=raw.join('').length;
+    if(batch.length&&(chars+size>6000||lines+raw.length>240)){batches.push(batch);batch=[];chars=0;lines=0}
+    batch.push(p);chars+=size;lines+=raw.length;
+  }
+  if(batch.length)batches.push(batch);
+  await processRequests(batches,async function(pages){
+    var raw=[],owner=[],local=[],starts=[],xs=[],ys=[],orig=[];
+    pages.forEach(function(p){
+      var bb=pageBboxCache[p],src=bb.rawLines;starts.push({page:p,line:raw.filter(function(t){return t.trim()}).length+1});
+      src.forEach(function(t,i){raw.push(t);owner.push(p);local.push(i);xs.push((src._xs||[])[i]);ys.push((src._ys||[])[i]);orig.push((src._orig||src)[i])});
+      raw.push('');owner.push(p);local.push(-1);xs.push(null);ys.push(null);orig.push('');
+    });
+    raw._xs=xs;raw._ys=ys;raw._orig=orig;raw._pageStarts=starts;
+    var merged=await aiMergeLines(raw,getKey());
+    if(!merged||!merged._idx)return;
+    var groups={};pages.forEach(function(p){groups[p]=[]});
+    merged._idx.forEach(function(ids){
+      var segment=[],last=null;
+      ids.forEach(function(i){
+        var p=owner[i];if(last!==null&&p!==last){groups[last].push(segment);segment=[]}
+        if(local[i]>=0)segment.push(local[i]);last=p;
+      });
+      if(segment.length)groups[last].push(segment);
+    });
+    pages.forEach(function(p){
+      var bb=pageBboxCache[p],texts=groups[p].map(function(ids){return _jnAll(ids.map(function(i){return bb.rawLines[i]})).replace(/\s+/g,' ').trim()});
+      if(texts.length){pageTextCache[p]=texts;bb.texts=texts;bb.bboxes=groupsToBboxes(groups[p],bb.rawYs)}
+    });
+  });
+}
+// 有界 IPC 预取窗，不是请求并发设置；真正发送的总上限只由 Rust 的共享许可决定。
+async function processRequests(items,work){
+  var next=0;
+  async function consume(){
+    while(next<items.length){
+      if(paused)await new Promise(waitResume);
+      if(paused)continue;
+      var item=items[next++];
+      if(Array.isArray(item)&&item[0]&&item[0].page)item.forEach(function(entry){pageState[entry.page]='t'});
+      refresh();await work(item);
+    }
+  }
+  var settled=await Promise.allSettled(Array.from({length:Math.min(64,items.length)},consume));
+  var failed=settled.find(function(result){return result.status==='rejected'});if(failed)throw failed.reason;
+}
 function countFails(p,arr){var f=arr.filter(function(t){return String(t).indexOf('__TRANSFAIL__')===0}).length;if(f){prog.failPages++;prog.failParas+=f;pageState[p]='f'}}
 function isTransientFailure(value){
   var text=String(value||'');
@@ -138,17 +200,6 @@ function isTransientFailure(value){
 function transientPages(){
   var pages=[];for(var p=1;p<=totalPages;p++)if(memCache[p]&&memCache[p].some(isTransientFailure))pages.push(p);
   return pages}
-async function processPages(order,work,firstPass){
-  var pos=0,active=0;
-  await new Promise(function(resolve){
-    function pump(){
-      if(pos>=order.length&&active===0){resolve();return}
-      while(!paused&&active<getConc()&&pos<order.length){(function(pn){active++;pageState[pn]='t';
-        work(pn).catch(function(e){addTransLog(pn,'',String(e&&e.message||e),'magpie','翻译',false);if(firstPass)prog.failPages++;pageState[pn]='f'})
-          .finally(function(){active--;if(firstPass){prog.done++;prog.doneTimes.push(Date.now());if(prog.doneTimes.length>30)prog.doneTimes.shift()}
-            if(pageState[pn]==='t')pageState[pn]='d';refresh();pump()})})(order[pos++])}
-      refresh();if(paused&&active===0)waitResume(pump)}
-    pump()})}
 async function retryOnePage(p){
   var ck=cacheKey,previous=memCache[p],ids=[];
   previous.forEach(function(value,i){if(isTransientFailure(value))ids.push(i)});
@@ -164,7 +215,11 @@ async function retryTransientFailures(){
     var pages=transientPages();if(!pages.length)return;
     prog.phase='retrying';prog.retryRound=round;refresh();
     await new Promise(function(resolve){setTimeout(resolve,2000*Math.pow(2,round-1))});
-    var before=prog.failParas;await processPages(pages,retryOnePage,false);
+    var before=prog.failParas;await processRequests(pages,async function(p){
+      pageState[p]='t';refresh();
+      try{await retryOnePage(p)}catch(e){pageState[p]='f';addTransLog(p,'',String(e.message||e),'magpie','翻译',false)}
+      refresh();
+    });
     log('自动重试第 '+round+'/2 轮：'+pages.length+' 页，失败段落 '+before+' → '+prog.failParas+'，仍有 '+transientPages().length+' 页暂时错误');
   }}
 
@@ -251,9 +306,9 @@ function bookCard(book){
   for(var c=0;c<cells;c++){var seen={};for(var k=c*group+1;k<=Math.min(n,(c+1)*group);k++)seen[states[k]||'w']=1;
     var st=seen.f?'f':seen.t?'t':seen.w?'w':seen.u?'u':seen.e?'e':'d';
     tiles+='<i class="tile '+st+'" title="第 '+(c*group+1)+(group>1?'–'+Math.min(n,(c+1)*group):'')+' 页"></i>'}
-  return '<div class="book"><div class="book-title">'+esc(p.title||baseOf(book.job.path))+'</div><div class="book-from">'+esc(p.from||'本地文件')+'，每本请求并发 '+(book.status.conc||6)+'</div>'
+  return '<div class="book"><div class="book-title">'+esc(p.title||baseOf(book.job.path))+'</div><div class="book-from">'+esc(p.from||'本地文件')+'，所有书合计最多 '+getConc()+' 个请求</div>'
     +'<div class="tiles" style="--ts:'+ts+'px">'+tiles+'</div><div class="stats"><span class="big">'+(p.done||0)+'<small>/ '+n+' 页</small></span>'
-    +'<span class="chip">'+(p.phase==='building'?'正在生成双栏 PDF':p.phase==='loading'?'正在读取 PDF':paused?'已暂停':p.phase==='retrying'?'自动重试第 '+p.retryRound+'/2 轮':eta||'正在翻译')+'</span>'
+    +'<span class="chip">'+(p.phase==='building'?'正在生成双栏 PDF':p.phase==='loading'?'正在读取 PDF':paused?'已暂停':p.phase==='segmenting'?'本地分段（不发请求）':p.phase==='merging'?'批量确认分段':p.phase==='retrying'?'自动重试第 '+p.retryRound+'/2 轮':eta||'正在翻译')+'</span>'
     +(p.failPages?'<span class="chip bad">'+p.failPages+' 页有失败段落（'+(p.failParas||0)+' 段）</span>':'')+'</div></div>'}
 function renderNow(){
   if(!$('job'))return;
@@ -308,11 +363,16 @@ async function renderPreview(){
   var demo={pages:30,done:18,failPages:1},lines=barLines(demo,0,false,'约 6 分'),c=await trayCanvas('thinking',lines,bar);
   ['pv-light','pv-dark'].forEach(function(id){var cv=$(id);if(!cv)return;cv.width=c.width;cv.height=44;cv.style.width=(c.width/2)+'px';var x=cv.getContext('2d');x.clearRect(0,0,cv.width,44);
     x.drawImage(c,0,0);x.globalCompositeOperation='source-in';x.fillStyle=id==='pv-dark'?'#ffffff':'#1d1d1f';x.fillRect(0,0,cv.width,44);x.globalCompositeOperation='source-over'})}
+function showConc(){
+  var select=$('set-conc'),value=String(getConc());if(!select)return;
+  if(!Array.from(select.options).some(function(option){return option.value===value})){var option=document.createElement('option');option.value=value;option.textContent=value;select.appendChild(option)}
+  select.value=value;
+}
 function initBarSettings(){
   ['set-top','set-bottom'].forEach(function(id){var s=$(id);s.innerHTML=BAR_KINDS.map(function(k){return '<option value="'+k[0]+'">'+k[1]+'</option>'}).join('')});
   $('set-books').value=String(parallelism);
   $('set-books').onchange=async function(){try{await T.core.invoke('set_book_parallelism',{count:Number(this.value)})}catch(e){this.value=String(parallelism);log('保存同时翻几本失败：'+e,false)}};
-  $('set-conc').value=String(getConc());
+  showConc();
   $('set-conc').onchange=async function(){try{await T.core.invoke('set_request_concurrency',{count:Number(this.value)})}catch(e){this.value=String(getConc());log('保存请求并发失败：'+e,false)}};
   $('set-top').value=bar.top;$('set-bottom').value=bar.bottom;$('set-face').checked=bar.face;$('set-sym').checked=bar.sym;$('set-fail').checked=bar.fail;
   var save=function(){bar.top=$('set-top').value;bar.bottom=$('set-bottom').value;bar.face=$('set-face').checked;bar.sym=$('set-sym').checked;bar.fail=$('set-fail').checked;
@@ -379,9 +439,9 @@ if(!engine)bindUI();
 
 // ══ Rust 是队列和完成列表的唯一所有者；面板只订阅聚合状态，绝不领取任务 ══
 function receiveState(s){
+  if(s.request_concurrency!=null){var count=String(s.request_concurrency);if(lsGet('pdfyi_conc','24')!==count){lsSet('pdfyi_conc',count);log('所有书合计最多同时发送 '+count+' 个请求')}}
   if(engine){paused=!!s.paused;if(!paused)resume();return}
-  if(s.request_concurrency!=null){var count=String(s.request_concurrency);if(lsGet('pdfyi_conc','6')!==count){lsSet('pdfyi_conc',count);log('每本请求并发改为 '+count+'，下一次派发页面生效')}}
-  $('set-conc').value=String(getConc());
+  showConc();
   queue=s.queue||[];running=Object.keys(s.running||{}).sort().map(function(k){return s.running[k]});
   paused=!!s.paused;parallelism=s.parallelism||2;
   var importing={};recent.forEach(function(r){if(r.importing)importing[r.source]=true});
@@ -397,6 +457,7 @@ function receiveState(s){
   $('set-books').value=String(parallelism);refresh();
 }
 if(T)(async function(){
+  await T.event.listen('request-concurrency',function(ev){lsSet('pdfyi_conc',String(ev.payload));if(!engine)showConc();refresh()});
   if(engine){
     await T.event.listen('pdfyi-job',function(){next()});
     await T.event.listen('engines-paused',function(ev){paused=!!ev.payload;if(!paused){resume();next()}});

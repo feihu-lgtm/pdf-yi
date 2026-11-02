@@ -7,10 +7,13 @@
 //   5. 打开文件、在访达中显示
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod request_limiter;
+
+use request_limiter::{RequestLimiter, MIN_CONCURRENCY, MAX_CONCURRENCY};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::DialogExt;
@@ -64,8 +67,11 @@ struct BackgroundState {
 
 struct PendingJobs(Mutex<BackgroundState>);
 
-// One shared pool across reader and engines; idle pooling never limits active requests.
-struct ModelHttp(ureq::Agent);
+// Shared transport and admission gate across every reader/panel/engine Webview.
+struct ModelHttp {
+    agent: ureq::Agent,
+    limiter: Arc<RequestLimiter>,
+}
 
 #[derive(serde::Deserialize)]
 struct ModelHttpRequest {
@@ -106,8 +112,12 @@ async fn model_http(
     if !matches!(request.method.as_str(), "GET" | "POST") {
         return Err("模型请求只支持 GET 或 POST".into());
     }
-    let agent = client.0.clone();
+    let agent = client.agent.clone();
+    let permit = client.limiter.acquire().await;
     tauri::async_runtime::spawn_blocking(move || {
+        // The blocking request outlives a cancelled invoke; retain its slot
+        // until its response body is read, including all error/unwind paths.
+        let _permit = permit;
         let mut http = agent.request(&request.method, url.as_str());
         for (name, value) in &request.headers { http = http.set(name, value); }
         let response = match match request.body {
@@ -264,12 +274,12 @@ fn engine_pull(app: AppHandle, window: tauri::WebviewWindow) -> Option<Job> {
     if !matches!(label, "engine-1" | "engine-2" | "engine-3" | "engine-4") { return None; }
     let state = app.state::<PendingJobs>();
     let mut s = state.0.lock().unwrap();
-    if s.paused || s.running.len() >= s.parallelism || s.running.contains_key(label) { return None; }
+    if s.request_concurrency.is_none() || s.paused || s.running.len() >= s.parallelism || s.running.contains_key(label) { return None; }
     let job = s.queue.pop_front()?;
     s.running.insert(label.into(), RunningBook { job: job.clone(), started_at: now_ms(), status: serde_json::json!({
         "prog": { "pages": 0, "done": 0, "failPages": 0, "failParas": 0, "doneTimes": [], "phase": "loading",
             "doneUntil": 0, "title": std::path::Path::new(&job.path).file_stem().unwrap_or_default().to_string_lossy(),
-            "from": if job.key.is_some() { "来自 Zotero" } else { "本地文件" } }, "pageState": [], "conc": 6 }) });
+            "from": if job.key.is_some() { "来自 Zotero" } else { "本地文件" } }, "pageState": [] }) });
     drop(s);
     lifecycle_log(&app, label, "START", &job.path);
     publish_background(&app);
@@ -292,8 +302,8 @@ fn engine_progress(app: AppHandle, window: tauri::WebviewWindow, status: serde_j
                 || status["prog"]["phase"] != book.status["prog"]["phase"]
                 || (done > before && (before == 0 || done == cached || done % 24 == 0))
             {
-                report = Some((book.job.path.clone(), format!("PROGRESS conc={} done={}/{} failedPages={} failedParas={} cached={} dirtyCachePages={} retryRound={}",
-                    status["conc"], done, status["prog"]["pages"], status["prog"]["failPages"], status["prog"]["failParas"], cached, status["dirtyCachePages"], status["retryRound"])));
+                report = Some((book.job.path.clone(), format!("PROGRESS globalCap={} phase={} phaseAMs={} done={}/{} failedPages={} failedParas={} cached={} dirtyCachePages={} retryRound={}",
+                    status["conc"], status["prog"]["phase"], status["prog"]["phaseAMs"], done, status["prog"]["pages"], status["prog"]["failPages"], status["prog"]["failParas"], cached, status["dirtyCachePages"], status["retryRound"])));
             }
             book.status = status;
         }
@@ -369,14 +379,24 @@ fn set_book_parallelism(app: AppHandle, count: usize) -> Result<(), String> {
     wake_engines(&app);
     Ok(())
 }
-// Rust 保留最新设置意图，面板启动/收到快照时统一写入共享 localStorage。
+// Keep the shared frontend preference and native admission gate synchronized live.
 #[tauri::command]
 fn set_request_concurrency(app: AppHandle, count: usize) -> Result<(), String> {
-    if ![6, 8, 10, 12, 16, 20, 24, 30].contains(&count) {
-        return Err("请求并发只能选 6/8/10/12/16/20/24/30".into());
+    if !(MIN_CONCURRENCY..=MAX_CONCURRENCY).contains(&count) {
+        return Err("同时最多发几个请求（所有书合计）必须是 6–64".into());
     }
-    app.state::<PendingJobs>().0.lock().unwrap().request_concurrency = Some(count);
+    let state = app.state::<PendingJobs>();
+    let mut background = state.0.lock().unwrap();
+    let path = settings_path(&app, "request-concurrency.json").ok_or("找不到设置目录")?;
+    std::fs::write(path, count.to_string()).map_err(|e| e.to_string())?;
+    app.state::<ModelHttp>().limiter.set_limit(count)?;
+    background.request_concurrency = Some(count);
+    drop(background);
+    let _ = app.emit("request-concurrency", count);
     publish_background(&app);
+    // First v65 launch may be migrating a localStorage-only preference. Jobs
+    // wait for that handshake instead of briefly sending under default 24.
+    wake_engines(&app);
     Ok(())
 }
 
@@ -640,7 +660,10 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
-        .manage(ModelHttp(ureq::AgentBuilder::new().timeout(Duration::from_secs(300)).build()))
+        .manage(ModelHttp {
+            agent: ureq::AgentBuilder::new().timeout(Duration::from_secs(300)).build(),
+            limiter: Arc::new(RequestLimiter::default()),
+        })
         .invoke_handler(tauri::generate_handler![
             tray_update,
             engine_pull,
@@ -667,10 +690,16 @@ fn main() {
             let parallelism = settings_path(app.handle(), "book-parallelism.json")
                 .and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| s.parse::<usize>().ok())
                 .filter(|n| (1..=4).contains(n)).unwrap_or(2);
+            let request_concurrency = settings_path(app.handle(), "request-concurrency.json")
+                .and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| s.parse::<usize>().ok())
+                .filter(|n| (MIN_CONCURRENCY..=MAX_CONCURRENCY).contains(n));
+            if let Some(count) = request_concurrency {
+                app.state::<ModelHttp>().limiter.set_limit(count).map_err(std::io::Error::other)?;
+            }
             let recent = settings_path(app.handle(), "background-recent.json")
                 .and_then(|p| std::fs::read(p).ok()).and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
             app.manage(PendingJobs(Mutex::new(BackgroundState {
-                queue: VecDeque::new(), running: HashMap::new(), recent, parallelism, paused: false, request_concurrency: None,
+                queue: VecDeque::new(), running: HashMap::new(), recent, parallelism, paused: false, request_concurrency,
             })));
             // Zotero 交来的链接：程序已经开着时走这里
             let h = app.handle().clone();
